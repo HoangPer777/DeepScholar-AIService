@@ -1,0 +1,13 @@
+services:
+  ai-service:
+    build: .
+    container_name: deepscholar-ai
+    environment:
+      # Use host.docker.internal to connect to Postgres/Redis running in DeepScholar-Backend's containers
+      - DATABASE_URL=postgresql://deepscholar:deepscholar@host.docker.internal:5432/deepscholar
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      - OPENAI_API_KEY=""
+    volumes:
+      - .:/app
+    ports:
+      - "8001:8001"
