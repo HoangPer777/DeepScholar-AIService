@@ -109,9 +109,11 @@ UPLOAD_DIR=./data/uploads      # PDF storage directory
 
 ### PDF Processing
 - `POST /api/pdf/upload` - Upload and process PDF
-  - FormData: `article_id`, `file` (PDF)
-  - Returns: `task_id`, metadata, chunk count
-- `GET /api/pdf/{task_id}/status` - Check processing status
+  - FormData: `file` (PDF)
+  - Header: `Authorization: Bearer <access_token>`
+  - Flow: upload to R2 -> extract title/abstract/content -> create article in backend -> queue embedding
+  - Returns: `task_id`, `article`, `pdf_url`
+- `GET /api/pdf/status?task_id=<id>` - Check embedding background task status
 
 ### Chatbot & Q&A
 - `POST /api/chat/ask` - Submit question about article
@@ -226,13 +228,11 @@ class AgentState(BaseModel):
 
 ## 🔄 PDF Processing Pipeline
 
-1. **Upload** - Accept PDF file via multipart form
-2. **Extract** - PyPDF2 extracts text from all pages
-3. **Infer Metadata** - Heuristic extraction of title, authors, abstract
-4. **Chunk** - Split text into 900-char chunks with 150-char overlap
-5. **Embed** - Generate 8-d mock vector for each chunk
-6. **Store** - Insert into PostgreSQL + pgvector table
-7. **Index** - Enable similarity search via `<=>` operator
+1. **Frontend Upload -> AI Service** - User uploads PDF to `POST /api/pdf/upload`.
+2. **R2 Upload** - AI service stores raw PDF in Cloudflare R2 and builds `pdf_url`.
+3. **Layout/Text Extraction** - AI service extracts `title`, `abstract`, and `content` (LlamaParse first, fallback PyPDF2 + LLM).
+4. **Backend Create Article** - AI service calls backend `POST /api/v1/articles/` with extracted fields and `pdf_url`.
+5. **Background Embedding** - In parallel (FastAPI `BackgroundTasks`), AI service chunks content, generates embeddings, and stores vectors in PGVector linked to created `article_id`.
 
 ## 🧪 Development Commands
 
@@ -247,7 +247,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 python -c "from app.main import app; print(app.title)"
 
 # Test PDF upload (Linux/macOS)
-curl -F "article_id=1" -F "file=@sample.pdf" \
+curl -X POST \
+  -H "Authorization: Bearer <access_token>" \
+  -F "file=@sample.pdf" \
   http://localhost:8000/api/pdf/upload
 
 # View API docs

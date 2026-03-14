@@ -1,10 +1,21 @@
-# TODO: Extract text from PDF files
-
+import io
+from PyPDF2 import PdfReader
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """
-    TODO: Extract text from PDF using PyPDF2 or other library
-    Handle: multi-page PDFs, different layouts
+    Extract text from PDF bypasses using PyPDF2.
     """
-    # TODO: Implementation
-    return ""
+    if not file_bytes:
+        return ""
+
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text
+    except Exception as e:
+        print(f"Error extracting PDF: {e}")
+        return ""
