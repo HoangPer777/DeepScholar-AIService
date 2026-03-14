@@ -56,3 +56,6 @@ sample.pdf
 .vagrant/
 .venv
 .DS_Store
+
+*.md
+!README.md
