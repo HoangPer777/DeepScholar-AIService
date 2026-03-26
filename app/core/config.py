@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
+
+
+from typing import Annotated, List
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -8,8 +12,17 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api"
     OPENAI_API_KEY: str = ""
     DATABASE_URL: str = "postgresql://deepscholar:deepscholar@localhost:5432/deepscholar"
-    CORS_ALLOW_ORIGINS: list[str] = ["*"]
+    CORS_ALLOW_ORIGINS: Annotated[List[str], NoDecode] = ["http://localhost:3000"]
     UPLOAD_DIR: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
+
+    @field_validator("CORS_ALLOW_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: str | List[str]) -> List[str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",")]
+        elif isinstance(v, (list, str)):
+            return v
+        raise ValueError(v)
 
     EMBEDDING_PROVIDER: str = "openai"  # Options: "openai" or "google"
     GOOGLE_API_KEY: str = ""
@@ -22,7 +35,7 @@ class Settings(BaseSettings):
     BACKEND_API_URL: str = "http://backend:8000/api/v1"
 
     # Internal secret for AI service -> Backend communication
-    INTERNAL_SERVICE_KEY: str = "deepscholar-secret-key-2026"
+    INTERNAL_SERVICE_KEY: str
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

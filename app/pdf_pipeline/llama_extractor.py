@@ -17,77 +17,122 @@ from app.core.config import settings
 
 
 def _clean_text(text: str) -> str:
-    """Collapse excessive newlines and trim trailing spaces."""
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    """Trim trailing spaces but preserve most newlines for content integrity."""
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
+
+
+def remove_references(text: str) -> str:
+    """
+    Remove the 'References', 'Appendix', 'Acknowledgements' sections and everything after them.
+    """
+    if not text:
+        return ""
+        
+    lines = text.split("\n")
+    cleaned_lines = []
+    
+    # Improved pattern to match:
+    # 1. References / Reference
+    # 2. Appendix / Appendices
+    # 3. Acknowledgements / Acknowledgment
+    # Supports markdown headings (#) and numbering (1., VI.)
+    stop_pattern = re.compile(
+        r"^(#+\s*)?([ivx]+\.?|\d+\.?\s*)?(references?|appendix|appendices|acknowledgments?)\s*$", 
+        re.IGNORECASE
+    )
+
+    found_stop = False
+    for line in lines:
+        stripped = line.strip()
+        if stop_pattern.match(stripped):
+            print(f"[Extractor] Found stop section at: '{stripped}'. Cutting text here.")
+            found_stop = True
+            break
+        cleaned_lines.append(line)
+        
+    result = "\n".join(cleaned_lines).strip()
+    if found_stop:
+        print(f"[Extractor] Content reduced from {len(text)} to {len(result)} chars.")
+    return result
 
 
 def _parse_paper_sections(full_text: str) -> dict:
     """
     Parse plain markdown text (all pages merged) into title / abstract / content.
-
-    Strategy (same as proven Colab script):
-    - TITLE    : first line that starts with '# '
-    - ABSTRACT : content between the line matching /# abstract/i  
-                 and the next heading that starts with '#'
-    - CONTENT  : content from the line matching
-                 /# (i\.|1)\s*introduction/i  onward.
-                 Falls back to the full text if no introduction heading found.
+    Uses a 'greedy' approach to ensure NO TEXT is lost between sections.
     """
     lines = full_text.split("\n")
 
     title: Optional[str] = None
-    abstract = ""
-    content = ""
+    abstract_lines = []
+    content_lines = []
 
-    # ── 1. Title ─────────────────────────────────────────────────────────────
-    for line in lines:
-        if line.startswith("# "):
-            title = line.replace("#", "").strip()
-            break
+    # Regex patterns for finding boundaries
+    # We allow headings (#) or just standalone words
+    abstract_pattern = re.compile(r"^(#+\s*)?abstract\s*$", re.IGNORECASE)
+    intro_pattern = re.compile(r"^(#+\s*)?([ivx]+\.?|\d+\.?\s*)?introduction\s*$", re.IGNORECASE)
+    stop_pattern = re.compile(
+        r"^(#+\s*)?([ivx]+\.?|\d+\.?\s*)?(references?|appendix|appendices|acknowledgments?)\s*$", 
+        re.IGNORECASE
+    )
 
-    # ── 2. Abstract ──────────────────────────────────────────────────────────
-    abstract_start = None
-    abstract_end = None
+    abstract_start_idx = -1
+    intro_start_idx = -1
+    stop_idx = len(lines)
 
+    # 1. Find boundaries first
     for i, line in enumerate(lines):
-        # Match any heading that contains the word "abstract"
-        if re.match(r"#+\s*abstract", line.strip(), re.IGNORECASE):
-            abstract_start = i + 1
-            continue
-        # Stop at the next heading after abstract block begins
-        if abstract_start is not None and line.strip().startswith("#"):
-            abstract_end = i
+        stripped = line.strip()
+        if not stripped: continue
+
+        if abstract_start_idx == -1 and abstract_pattern.match(stripped):
+            abstract_start_idx = i
+        elif intro_start_idx == -1 and intro_pattern.match(stripped):
+            intro_start_idx = i
+        elif stop_pattern.match(stripped):
+            # Only set stop_idx if it's after introduction (to avoid early stopping)
+            if i > intro_start_idx and intro_start_idx != -1:
+                stop_idx = i
+                print(f"[Parser] Stop section found at line {i}: {stripped}")
+                break
+
+    # 2. Extract Title (first meaningful line before Abstract)
+    search_limit = abstract_start_idx if abstract_start_idx != -1 else 20
+    for i in range(min(search_limit, len(lines))):
+        stripped = lines[i].strip()
+        if stripped and not stripped.startswith("#"):
+            title = stripped
+            break
+        elif stripped.startswith("#"):
+            title = re.sub(r"^#+\s*", "", stripped)
             break
 
-    if abstract_start is not None:
-        if abstract_end is None:
-            abstract_end = len(lines)
-        abstract = "\n".join(lines[abstract_start:abstract_end]).strip()
+    # 3. Extract Abstract (everything between 'Abstract' and 'Introduction')
+    if abstract_start_idx != -1:
+        end_idx = intro_start_idx if intro_start_idx != -1 else abstract_start_idx + 20
+        # Skip the 'Abstract' heading itself
+        abstract_lines = lines[abstract_start_idx+1 : end_idx]
 
-    # ── 3. Content ───────────────────────────────────────────────────────────
-    content_start = None
+    # 4. Extract Content (everything between 'Introduction' and 'Stop Section')
+    # If no intro found, we start after abstract
+    start_content = intro_start_idx if intro_start_idx != -1 else (abstract_start_idx + len(abstract_lines) + 1 if abstract_start_idx != -1 else 0)
+    
+    # Capture EVERYTHING in this range
+    content_lines = lines[start_content : stop_idx]
 
-    for i, line in enumerate(lines):
-        # Match "# I. Introduction", "# 1. Introduction", "# 1 Introduction" etc.
-        if re.match(r"#+\s*(i\.|1\.?)\s*introduction", line.strip(), re.IGNORECASE):
-            content_start = i
-            break
-
-    if content_start is not None:
-        content = "\n".join(lines[content_start:]).strip()
+    # Clean up title
+    if title:
+        title = re.sub(r"^(Paper Title|Title):?\s*", "", title, flags=re.IGNORECASE).strip()
     else:
-        # Fallback: use everything from after the abstract block
-        if abstract_end is not None:
-            content = "\n".join(lines[abstract_end:]).strip()
-        else:
-            content = full_text
+        title = "Untitled Extract"
+
+    print(f"[Parser] Extraction complete. Abstract: {len(abstract_lines)} lines, Content: {len(content_lines)} lines.")
 
     return {
-        "title": title or "",
-        "abstract": abstract,
-        "content": content,
+        "title": title,
+        "abstract": "\n".join(abstract_lines).strip(),
+        "content": "\n".join(content_lines).strip(),
     }
 
 
@@ -118,15 +163,8 @@ def extract_sections_with_llamaparse(file_bytes: bytes) -> Optional[dict]:
             num_workers=1,
             verbose=False,
             language="en",
-            system_prompt=(
-                "This is an IEEE format scientific research paper. "
-                "Please extract and preserve all sections: "
-                "Title, Abstract, Introduction, Methodology, Results, "
-                "Discussion, Conclusion, References. "
-                "Use proper markdown headings (# for title, ## for sections). "
-                "Do NOT insert '# Session N' or '## Session N' markers. "
-                "Preserve all mathematical equations, tables, and figure captions."
-            ),
+            # We remove the system_prompt here to prevent LlamaParse from "extracting" or "summarizing".
+            # This ensures we get a faithful, full-text Markdown conversion.
         )
 
         # LlamaParse requires a file path → write bytes to temp file

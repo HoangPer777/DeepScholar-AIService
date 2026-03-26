@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.pdf_pipeline.llama_extractor import extract_sections_with_llamaparse
+from app.pdf_pipeline.llama_extractor import extract_sections_with_llamaparse, remove_references
 from app.pdf_pipeline.extractor import extract_text_from_pdf
 from app.pdf_pipeline.llm_extractor import extract_metadata_from_text
 from app.pdf_pipeline.chunker import chunk_text
@@ -66,7 +66,7 @@ def _download_pdf_from_r2(pdf_url: str) -> bytes:
 
 def process_pdf_pipeline(request: PDFUploadRequest):
     """
-    Background task: Full AI extraction pipeline.
+    Full AI extraction pipeline.
 
     Flow:
     1. Download PDF from Cloudflare R2 via boto3
@@ -83,30 +83,36 @@ def process_pdf_pipeline(request: PDFUploadRequest):
         # ── Step 2: Extract sections with LlamaParse ──────────────────────────
         extracted = extract_sections_with_llamaparse(file_bytes)
 
-        if extracted and extracted.get("title"):
+        if extracted and extracted.get("title") and len(extracted.get("content", "")) > 50:
             title = extracted["title"]
             abstract = extracted["abstract"]
             content = extracted["content"]
-            print("[Pipeline] LlamaParse extraction complete.")
+            print(f"[Pipeline] LlamaParse SUCCESS. Title: {title[:50]}")
         else:
             # Fallback: PyPDF2 → LLM extraction
-            print("[Pipeline] Falling back to PyPDF2 + LLM extraction...")
+            print(f"[Pipeline] LlamaParse returned insufficient data. Falling back to PyPDF2 + LLM...")
             raw_text = extract_text_from_pdf(file_bytes)
             if not raw_text:
-                print(f"[Pipeline] ERROR: Could not extract any text from {request.slug}")
-                return
+                print(f"[Pipeline] ERROR: No text found in PDF {request.slug}")
+                return {"error": "Could not extract any text from PDF"}
 
+            print(f"[Pipeline] Raw text extracted ({len(raw_text)} chars). Asking LLM for metadata...")
             metadata = extract_metadata_from_text(raw_text)
-            title = metadata.get("title", "Untitled")
-            abstract = metadata.get("abstract", "")
-            content = raw_text  # Use the full raw text as content
+            title = metadata.get("title", "Untitled Paper")
+            abstract = metadata.get("abstract", "No abstract available.")
+            # Remove references from the raw text fallback as well
+            content = remove_references(raw_text)
+            print(f"[Pipeline] LLM Fallback SUCCESS. Title: {title[:50]}")
 
         print(f"[Pipeline] Title: {title[:80]}")
         print(f"[Pipeline] Abstract: {abstract[:120]}...")
         print(f"[Pipeline] Content: {len(content)} characters")
 
         # ── Step 3: Update Django Backend via internal API ────────────────────
-        backend_url = settings.BACKEND_API_URL
+        # Ensure the URL ends with a trailing slash for Django
+        backend_url = settings.BACKEND_API_URL.rstrip('/')
+        update_url = f"{backend_url}/articles/{request.slug}/"
+        
         update_payload = {
             "title": title,
             "abstract": abstract,
@@ -115,11 +121,13 @@ def process_pdf_pipeline(request: PDFUploadRequest):
         }
 
         backend_headers = {
-            "X-Internal-Service-Key": settings.INTERNAL_SERVICE_KEY
+            "X-Internal-Service-Key": settings.INTERNAL_SERVICE_KEY,
+            "Content-Type": "application/json"
         }
 
+        print(f"[Pipeline] Patching Backend: {update_url}")
         backend_response = requests.patch(
-            f"{backend_url}/articles/{request.slug}/",
+            update_url,
             json=update_payload,
             headers=backend_headers,
             timeout=30
@@ -139,30 +147,52 @@ def process_pdf_pipeline(request: PDFUploadRequest):
         print(f"[Pipeline] Vector DB ingestion result: {result}")
 
         print(f"[Pipeline] ✅ Completed for article: {request.slug}")
+        return {
+            "status": "success",
+            "title": title,
+            "abstract": abstract,
+            "content": content
+        }
 
     except Exception as e:
         print(f"[Pipeline] ❌ Error for article {request.slug}: {e}")
         import traceback
         traceback.print_exc()
+        return {"error": str(e)}
 
 
 @router.post("/upload")
-async def upload_pdf(
+def upload_pdf(
     request: PDFUploadRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    sync: bool = False
 ):
     """
     Triggered by the Frontend after R2 upload completes.
 
     Accepts the R2 public URL, article slug, and article ID,
-    then queues the full AI extraction pipeline as a background task.
+    then either waits for the pipeline to finish (sync=True)
+    or queues it as a background task (sync=False).
+    
+    Using 'def' (not 'async def') so FastAPI runs this in a thread pool,
+    preventing the blocking of the main event loop during extraction.
     """
-    background_tasks.add_task(process_pdf_pipeline, request)
-    return {
-        "status": "processing_started",
-        "slug": request.slug,
-        "message": "LlamaParse extraction + vector embedding pipeline queued successfully."
-    }
+    if sync:
+        result = process_pdf_pipeline(request)
+        if "error" in result:
+            return {"status": "error", "message": result["error"]}
+        return {
+            "status": "completed",
+            "slug": request.slug,
+            "data": result
+        }
+    else:
+        background_tasks.add_task(process_pdf_pipeline, request)
+        return {
+            "status": "processing_started",
+            "slug": request.slug,
+            "message": "LlamaParse extraction + vector embedding pipeline queued successfully."
+        }
 
 
 @router.get("/status")
