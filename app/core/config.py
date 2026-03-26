@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
 
 
-from typing import List
+from typing import Annotated, List
 from pydantic import field_validator
 
 
@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api"
     OPENAI_API_KEY: str = ""
     DATABASE_URL: str = "postgresql://deepscholar:deepscholar@localhost:5432/deepscholar"
-    CORS_ALLOW_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_ALLOW_ORIGINS: Annotated[List[str], NoDecode] = ["http://localhost:3000"]
     UPLOAD_DIR: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
 
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
