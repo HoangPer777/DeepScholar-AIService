@@ -1,49 +1,55 @@
-from pathlib import Path
+from functools import lru_cache
+from typing import List
 
-from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
-
-
-from typing import Annotated, List
-from pydantic import field_validator
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "DeepScholar AI"
-    API_PREFIX: str = "/api"
-    OPENAI_API_KEY: str = ""
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    PROJECT_NAME: str = "DeepScholar AI Service"
+    API_PREFIX: str = "/api/v1"
+
+    ENV: str = "dev"
+    DEBUG: bool = False
+    PORT: int = 8000
+
+    CORS_ALLOW_ORIGINS: str = "*"
+    CORS_ORIGINS: str = "*"
+
     DATABASE_URL: str = "postgresql://deepscholar:deepscholar@localhost:5432/deepscholar"
-    CORS_ALLOW_ORIGINS: Annotated[List[str], NoDecode] = ["http://localhost:3000"]
-    UPLOAD_DIR: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
 
-    @field_validator("CORS_ALLOW_ORIGINS", mode="before")
-    @classmethod
-    def assemble_cors_origins(cls, v: str | List[str]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
-
-    EMBEDDING_PROVIDER: str = "openai"  # Options: "openai" or "google"
+    EMBEDDING_PROVIDER: str = "google"
+    EMBEDDING_DIMENSION: int = 768
+    OPENAI_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
-    MAX_CHAT_HISTORY: int = 20
 
-    # LlamaParse API key from https://cloud.llamaindex.ai
-    LLAMAPARSE_API_KEY: str = ""
+    BACKEND_API_URL: str = "http://host.docker.internal:8000/api/v1"
+    INTERNAL_SERVICE_KEY: str = ""
 
-    # Django backend base URL for internal service calls
-    BACKEND_API_URL: str = "http://backend:8000/api/v1"
+    LLM_PROVIDER: str = "groq"
+    REQUEST_TIMEOUT_SECONDS: int = 45
 
-    # Internal secret for AI service -> Backend communication
-    INTERNAL_SERVICE_KEY: str
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    RATE_LIMIT_PER_MINUTE: int = 10
 
     @property
-    def EMBEDDING_DIMENSION(self) -> int:
-        # gemini-embedding-001 in this project returns 3072 dimensions
-        return 3072 if self.EMBEDDING_PROVIDER == "google" else 1536
+    def cors_allow_origins_list(self) -> List[str]:
+        raw = (self.CORS_ALLOW_ORIGINS or self.CORS_ORIGINS or "*").strip()
+        if not raw:
+            return ["*"]
+
+        # Accept both JSON-like list syntax and comma-separated plain strings from .env
+        if raw.startswith("[") and raw.endswith("]"):
+            raw = raw[1:-1]
+
+        origins = [item.strip().strip('"').strip("'") for item in raw.split(",") if item.strip()]
+        return origins or ["*"]
 
 
-settings = Settings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
 
+
+settings = get_settings()

@@ -1,35 +1,38 @@
-# TODO: Implement memory stores for chat history and PDF processing status
+from typing import List, Dict, Optional
+import time
+
+_store: List[Dict] = []
 
 
-class InMemoryStore:
-    """TODO: In-memory key-value store (replace with Redis in production)"""
-    def __init__(self):
-        # TODO: Initialize storage
-        pass
-
-    def set(self, key, value):
-        # TODO: Store value
-        pass
-
-    def get(self, key):
-        # TODO: Retrieve value
-        pass
+def memory_save(data: Dict) -> None:
+    entry = {
+        "q": data.get("q", ""),
+        "a": data.get("a", ""),
+        "timestamp": data.get("timestamp", time.time()),
+    }
+    _store.append(entry)
+    if len(_store) > 100:
+        _store.pop(0)
 
 
-class ChatHistoryStore:
-    """TODO: Store chat conversations (replace with database in production)"""
-    def __init__(self):
-        # TODO: Initialize storage
-        pass
+def memory_recall(query: Optional[str] = None, top_k: int = 3) -> List[Dict]:
+    if not _store:
+        return []
 
-    def append(self, session_id, item):
-        # TODO: Add message to history
-        pass
+    if query is None:
+        return [{"text": f"Q: {e['q']}\nA: {e['a']}", "source": "memory"} for e in _store[-top_k:]]
 
-    def get(self, session_id):
-        # TODO: Retrieve chat history
-        pass
+    query_words = set(query.lower().split())
+    scored = []
+    for entry in _store:
+        entry_text = (entry["q"] + " " + entry["a"]).lower()
+        overlap = sum(1 for w in query_words if w in entry_text)
+        if overlap > 0:
+            scored.append((overlap, entry))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [{"text": f"Q: {e['q']}\nA: {e['a']}", "source": "memory"} for _, e in scored[:top_k]]
 
 
-pdf_status_store = InMemoryStore()
-chat_history_store = ChatHistoryStore()
+def memory_clear() -> None:
+    _store.clear()

@@ -1,15 +1,14 @@
 from app.workflows.states import AgentState
+from app.tools.external_search import external_search
 
 
 class ResearcherAgent:
-    """TODO: Search external sources (Google Scholar, Semantic Scholar)"""
+    """Search external sources (Google CSE and Semantic Scholar)."""
 
     def search(self, state: AgentState) -> AgentState:
-        """
-        TODO: Implement external search:
-        1. Query Google Scholar API
-        2. Query Semantic Scholar API
-        3. Return relevant papers/context
-        """
-        # TODO: Implementation
+        if not state.need_external_search:
+            state.external_context = []
+            return state
+
+        state.external_context = external_search(state.question, top_k=5)
         return state

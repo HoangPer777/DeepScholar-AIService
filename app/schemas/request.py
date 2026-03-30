@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class ChatRequest(BaseModel):
@@ -8,4 +8,7 @@ class ChatRequest(BaseModel):
 
 
 class ResearchRequest(BaseModel):
-	query: str = Field(min_length=3)
+	question: str = Field(min_length=3, validation_alias=AliasChoices("question", "query"))
+	article_id: int | None = None
+	max_iterations: int = Field(default=2, ge=1, le=5)
+	session_id: str | None = None

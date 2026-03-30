@@ -1,13 +1,29 @@
 import os
+from functools import lru_cache
+
 from langchain_openai import OpenAIEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from app.core.config import settings
 
+
+@lru_cache(maxsize=1)
 def get_embeddings():
     """
     Returns the configured Langchain Embeddings model based on the chosen provider.
     """
-    if settings.EMBEDDING_PROVIDER == "google":
+    provider = (settings.EMBEDDING_PROVIDER or "google").lower()
+
+    if provider == "huggingface":
+        model_name = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+        print(f"[Embedder] Using HuggingFace model: {model_name}")
+        return HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+
+    if provider == "google":
         # models/gemini-embedding-001 is available in the user's current API key list.
         # models/text-embedding-004 was confirmed NOT-FOUND (404).
         model_name = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-001")

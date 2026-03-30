@@ -4,8 +4,13 @@ langchain>=0.3
 langgraph>=0.2
 langchain-text-splitters>=0.3
 langchain-openai>=0.2
+langchain-groq>=0.2
 langchain-google-genai==2.0.7
+langchain-postgres>=0.0.9
+langchain-huggingface>=0.1.0
+sentence-transformers>=3.0
 psycopg2-binary>=2.9
+psycopg[binary]>=3.1
 pgvector>=0.3
 SQLAlchemy==2.0.30
 pydantic>=2.8

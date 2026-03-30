@@ -49,29 +49,41 @@ def review_node(state: AgentState):
 
 
 def route_after_planner(state: AgentState):
-    # TODO: Route to Clarifier or Reader based on planning decision
-    pass
+    if state.need_clarification:
+        return "clarifier"
+    return "reader"
 
 
 def route_after_reader(state: AgentState):
-    # TODO: Route to Researcher or Writer based on need_external_search
-    pass
+    if state.need_external_search:
+        return "researcher"
+    return "writer"
 
 
 def route_after_reviewer(state: AgentState):
-    # TODO: Route to Writer (rewrite) or END based on confidence score and iterations
-    pass
+    if state.confidence_score < 0.7 and state.iteration_count < state.max_iterations:
+        return "rewrite"
+    return "accept"
 
 
-# TODO: Build LangGraph workflow
 workflow = StateGraph(AgentState)
+workflow.add_node("planner", plan_node)
+workflow.add_node("clarifier", clarify_node)
+workflow.add_node("reader", read_node)
+workflow.add_node("researcher", research_node)
+workflow.add_node("writer", write_node)
+workflow.add_node("reviewer", review_node)
 
-# TODO: Add all nodes
-# TODO: Set entry point
-# TODO: Connect nodes with edges and conditional edges
-# TODO: Compile workflow
+workflow.set_entry_point("planner")
 
-compiled_workflow = None
+workflow.add_conditional_edges("planner", route_after_planner, {"clarifier": "clarifier", "reader": "reader"})
+workflow.add_edge("clarifier", "reader")
+workflow.add_conditional_edges("reader", route_after_reader, {"researcher": "researcher", "writer": "writer"})
+workflow.add_edge("researcher", "writer")
+workflow.add_edge("writer", "reviewer")
+workflow.add_conditional_edges("reviewer", route_after_reviewer, {"rewrite": "writer", "accept": END})
+
+compiled_workflow = workflow.compile()
 
 
 def run_chat_workflow(question: str, article_id: int, session_id: str | None = None) -> AgentState:
@@ -81,7 +93,7 @@ def run_chat_workflow(question: str, article_id: int, session_id: str | None = N
     Output: AgenState with draft_answer/reviewed_answer and citations
     """
     state = AgentState(question=question, article_id=article_id, session_id=session_id)
-    # TODO: Invoke compiled workflow
-    # result = compiled_workflow.invoke(state)
-    # TODO: Return AgentState
-    return state
+    result = compiled_workflow.invoke(state.model_dump())
+    if isinstance(result, AgentState):
+        return result
+    return AgentState(**result)

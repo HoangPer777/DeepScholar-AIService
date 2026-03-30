@@ -2,5 +2,14 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .env
 .git/
+.gitignore
+.dockerignore
+*.md
+*.ipynb
+*.log
+.vscode/
+tests/
