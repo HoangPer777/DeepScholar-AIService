@@ -12,7 +12,7 @@ router = APIRouter()
 _GRAPH_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
-@router.post("/deep-search")
+@router.post("/deep-research")
 async def deep_search(request: ResearchRequest):
     started_at = time.time()
     timeout_seconds = int(os.getenv("DEEP_RESEARCH_TIMEOUT_SECONDS", "90"))
