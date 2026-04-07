@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # Internal secret for AI service -> Backend communication
     INTERNAL_SERVICE_KEY: str
 
+    # ============================================================
+    # AGENT LLM (Groq)
+    # ============================================================
+    GROQ_API_KEY: str = ""
+    TAVILY_API_KEY: str = ""
+    GROQ_LLM_MODEL: str = "llama-3.1-8b-instant"
+    AGENT_LLM_PROVIDER: str = "groq"  # "groq" | "openai" | "google"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
