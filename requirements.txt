@@ -5,6 +5,8 @@ langgraph>=0.2
 langchain-text-splitters>=0.3
 langchain-openai>=0.2
 langchain-google-genai==2.0.7
+langchain-groq>=0.1
+tavily-python>=0.3
 psycopg2-binary>=2.9
 pgvector>=0.3
 SQLAlchemy==2.0.30
