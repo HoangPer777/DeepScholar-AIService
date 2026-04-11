@@ -1,0 +1,51 @@
+name: Deploy AI Service
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            docker pull ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
+
+            docker stop deepscholar-ai || true
+            docker rm deepscholar-ai || true
+
+            docker run -d \
+              --name deepscholar-ai \
+              --restart unless-stopped \
+              --memory 500m \
+              -p 8001:8001 \
+              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              -e REDIS_URL="${{ secrets.REDIS_URL }}" \
+              -e BACKEND_API_URL="http://localhost:8000/api/v1" \
+              -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+              -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+              ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
