@@ -5,7 +5,7 @@ from app.prompts.clarifier_prompt import CLARIFIER_PROMPT
 from app.workflows.states import AgentState
 
 
-class ClarifierAgent:
+class ClarifierAgent: //
     def __init__(self, llm):
         self.llm = llm
 
