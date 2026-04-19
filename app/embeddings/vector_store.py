@@ -1,7 +1,12 @@
+import traceback
 from sqlalchemy import inspect, text
 from app.core.database import engine, SessionLocal
 from app.embeddings.models import Base, ArticleChunk, Embedding
 from app.embeddings.embedder import embed_texts
+from app.core.config import settings
+from app.core.logger import get_logger
+
+logger = get_logger(__name__)
 
 def database_health() -> dict:
     """
@@ -23,17 +28,20 @@ def ensure_pgvector_schema():
         with engine.begin() as conn:
             # text() is required in SQLAlchemy 2.x for raw SQL strings
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        print("pgvector extension ensured.")
+        logger.info("pgvector extension ensured.")
     except Exception as e:
-        # Extension may already exist or user may lack permissions — non-fatal
-        print(f"Note: pgvector extension step: {e}")
+        logger.error(
+            "pgvector extension is not available. Enable it in the Supabase dashboard under Database > Extensions."
+        )
+        raise
 
     try:
         # Always attempt to create tables even if extension step had an issue
         Base.metadata.create_all(bind=engine)
-        print("Database schema ensured (article_chunks + embeddings tables ready).")
+        logger.info("Database schema ensured (article_chunks + embeddings tables ready).")
     except Exception as e:
-        print(f"Error creating schema tables: {e}")
+        logger.error(f"Error creating schema tables: {e}")
+        raise
 
 def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
     """
@@ -57,6 +65,12 @@ def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
             # 2. Generate embeddings for all chunks in batch
             embeddings_list = embed_texts(chunks)
 
+            # 2a. Validate embedding dimension before attempting pgvector insert
+            if embeddings_list and len(embeddings_list[0]) != settings.EMBEDDING_DIMENSION:
+                raise ValueError(
+                    f"Dimension mismatch: model returned {len(embeddings_list[0])}D but EMBEDDING_DIMENSION={settings.EMBEDDING_DIMENSION}"
+                )
+
             # 3. Insert new chunks and their embeddings
             for i, (chunk_text, embedding_vector) in enumerate(zip(chunks, embeddings_list)):
                 db_chunk = ArticleChunk(
@@ -77,6 +91,7 @@ def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
             return {"stored": True, "chunk_count": len(chunks)}
         except Exception as e:
             session.rollback()
+            logger.error(f"ingest_article_chunks failed: {e}\n{traceback.format_exc()}")
             return {"stored": False, "chunk_count": 0, "error": str(e)}
 
 def similarity_search(article_id: int, query_embedding: list[float], limit: int = 5):

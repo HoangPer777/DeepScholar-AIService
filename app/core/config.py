@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "DeepScholar AI"
     API_PREFIX: str = "/api"
     OPENAI_API_KEY: str = ""
-    DATABASE_URL: str = "postgresql://deepscholar:deepscholar@localhost:5432/deepscholar"
+    DATABASE_URL: str
     CORS_ALLOW_ORIGINS: Annotated[List[str], NoDecode] = ["http://localhost:3000"]
     UPLOAD_DIR: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
 
@@ -24,7 +24,9 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
-    EMBEDDING_PROVIDER: str = "openai"  # Options: "openai" or "google"
+    EMBEDDING_PROVIDER: str = "openai"  # Options: "openai", "google", "huggingface"
+    EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+    EMBEDDING_DIMENSION: int = 768  # Read from .env; must match the model output size
     GOOGLE_API_KEY: str = ""
     MAX_CHAT_HISTORY: int = 20
 
@@ -46,11 +48,6 @@ class Settings(BaseSettings):
     AGENT_LLM_PROVIDER: str = "groq"  # "groq" | "openai" | "google"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    @property
-    def EMBEDDING_DIMENSION(self) -> int:
-        # gemini-embedding-001 in this project returns 3072 dimensions
-        return 3072 if self.EMBEDDING_PROVIDER == "google" else 1536
 
 
 settings = Settings()
