@@ -45,7 +45,7 @@ jobs:
               -p 8001:8001 \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e REDIS_URL="${{ secrets.REDIS_URL }}" \
-              -e BACKEND_API_URL="http://localhost:8000/api/v1" \
+              -e BACKEND_API_URL="${{ secrets.BACKEND_API_URL }}" \
               -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
               -e GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
               -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
