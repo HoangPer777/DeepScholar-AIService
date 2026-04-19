@@ -65,18 +65,17 @@ class _GoogleGenAIEmbeddings:
         from google.genai import types
         client = self._get_client()
         result = []
-        # Batch in groups of 100 (API limit)
-        for i in range(0, len(texts), 100):
-            batch = texts[i:i + 100]
+        # Embed one text at a time — gemini-embedding-2-preview returns one embedding
+        # per call when contents is a list, but behavior varies; per-text is safest.
+        for text in texts:
             response = client.models.embed_content(
                 model=self.model,
-                contents=batch,
+                contents=text,
                 config=types.EmbedContentConfig(
                     task_type="RETRIEVAL_DOCUMENT",
                 ),
             )
-            for emb in response.embeddings:
-                result.append(list(emb.values))
+            result.append(list(response.embeddings[0].values))
         return result
 
     def embed_query(self, text: str) -> list[float]:
