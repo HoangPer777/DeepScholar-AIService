@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.logger import get_logger
 from app.pdf_pipeline.llama_extractor import extract_sections_with_llamaparse, remove_references
 from app.pdf_pipeline.extractor import extract_text_from_pdf
 from app.pdf_pipeline.llm_extractor import extract_metadata_from_text
@@ -14,6 +15,7 @@ from app.pdf_pipeline.chunker import chunk_text
 from app.embeddings.vector_store import ingest_article_chunks
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 class PDFUploadRequest(BaseModel):
@@ -145,6 +147,17 @@ def process_pdf_pipeline(request: PDFUploadRequest):
 
         result = ingest_article_chunks(request.article_id, chunks)
         print(f"[Pipeline] Vector DB ingestion result: {result}")
+
+        if not result.get("stored"):
+            error_msg = result.get("error", "Unknown embedding error")
+            logger.error(f"[Pipeline] Embedding ingestion failed for article {request.slug}: {error_msg}")
+            return {
+                "status": "partial_success",
+                "embedding_error": error_msg,
+                "title": title,
+                "abstract": abstract,
+                "content": content
+            }
 
         print(f"[Pipeline] ✅ Completed for article: {request.slug}")
         return {

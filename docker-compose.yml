@@ -7,7 +7,6 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://deepscholar:deepscholar@host.docker.internal:5432/deepscholar
       - REDIS_URL=redis://host.docker.internal:6379/0
       - BACKEND_API_URL=http://host.docker.internal:8000/api/v1
     volumes:
