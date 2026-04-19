@@ -56,4 +56,14 @@ jobs:
               -e EMBEDDING_DIMENSION="${{ secrets.EMBEDDING_DIMENSION }}" \
               -e AGENT_LLM_PROVIDER="${{ secrets.AGENT_LLM_PROVIDER }}" \
               -e GROQ_LLM_MODEL="${{ secrets.GROQ_LLM_MODEL }}" \
+              -e CORS_ALLOW_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
+              -e GOOGLE_EMBEDDING_MODEL="${{ secrets.GOOGLE_EMBEDDING_MODEL }}" \
+              -e GROQ_MODEL="${{ secrets.GROQ_MODEL }}" \
+              -e GROQ_FAST_MODEL="${{ secrets.GROQ_FAST_MODEL }}" \
+              -e GOOGLE_CSE_ID="${{ secrets.GOOGLE_CSE_ID }}" \
+              -e AWS_ENDPOINT_URL="${{ secrets.AWS_ENDPOINT_URL }}" \
+              -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+              -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+              -e AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" \
+              -e AWS_S3_REGION_NAME="${{ secrets.AWS_S3_REGION_NAME }}" \
               ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
