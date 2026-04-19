@@ -47,7 +47,13 @@ jobs:
               -e REDIS_URL="${{ secrets.REDIS_URL }}" \
               -e BACKEND_API_URL="http://localhost:8000/api/v1" \
               -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+              -e GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
+              -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
               -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
               -e LLAMAPARSE_API_KEY="${{ secrets.LLAMAPARSE_API_KEY }}" \
               -e INTERNAL_SERVICE_KEY="${{ secrets.INTERNAL_SERVICE_KEY }}" \
+              -e EMBEDDING_PROVIDER="${{ secrets.EMBEDDING_PROVIDER }}" \
+              -e EMBEDDING_DIMENSION="${{ secrets.EMBEDDING_DIMENSION }}" \
+              -e AGENT_LLM_PROVIDER="${{ secrets.AGENT_LLM_PROVIDER }}" \
+              -e GROQ_LLM_MODEL="${{ secrets.GROQ_LLM_MODEL }}" \
               ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
