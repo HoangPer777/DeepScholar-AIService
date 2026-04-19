@@ -48,4 +48,6 @@ jobs:
               -e BACKEND_API_URL="http://localhost:8000/api/v1" \
               -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
               -e TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+              -e LLAMAPARSE_API_KEY="${{ secrets.LLAMAPARSE_API_KEY }}" \
+              -e INTERNAL_SERVICE_KEY="${{ secrets.INTERNAL_SERVICE_KEY }}" \
               ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
