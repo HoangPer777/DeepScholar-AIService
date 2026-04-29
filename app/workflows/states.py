@@ -37,7 +37,7 @@ class AgentState(BaseModel):
     # Số lần Writer đã viết lại
     iteration_count: int = 0
     # Giới hạn số lần viết lại
-    max_iterations: int = 3
+    max_iterations: int = 1
 
     # To track agent execution flow
     logs: List[str] = Field(default_factory=list)
