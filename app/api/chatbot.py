@@ -51,5 +51,5 @@ def _extract_citations(result: dict) -> list:
             "apa_year": s.get("apa_year", "n.d."),
         }
         for i, s in enumerate(external)
-        if s.get("title") != "__research_notes__"
+        if s.get("title") != "__research_notes__" # redeploy
     ]
