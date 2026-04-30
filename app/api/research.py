@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import uuid
 from fastapi import APIRouter, HTTPException
 
@@ -6,6 +7,10 @@ from app.schemas.request import ResearchRequest
 from app.workflows.rag_workflow import run_chat_workflow
 
 router = APIRouter()
+
+# Dedicated thread pool for long-running research jobs
+# Prevents default ThreadPoolExecutor saturation from blocking the event loop
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 # In-memory job store: task_id -> {"status": "pending"|"done"|"error", "result": ..., "error": ...}
 _jobs: dict = {}
@@ -49,7 +54,7 @@ async def _run_job(task_id: str, question: str):
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
-            None,
+            _executor,  # Use dedicated executor, not default (prevents saturation)
             lambda: run_chat_workflow(question=question, article_id=None)
         )
         _jobs[task_id] = {"status": "done", "result": _build_response(result)}

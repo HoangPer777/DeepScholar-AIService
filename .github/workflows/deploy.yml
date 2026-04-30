@@ -41,7 +41,7 @@ jobs:
             docker run -d \
               --name deepscholar-ai \
               --restart unless-stopped \
-              --memory 500m \
+              --memory 1500m \
               -p 8001:8001 \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e REDIS_URL="${{ secrets.REDIS_URL }}" \
