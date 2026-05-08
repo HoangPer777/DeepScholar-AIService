@@ -2,8 +2,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.core.utils import effective_question, log
 from app.prompts.researcher_prompt import RESEARCHER_PROMPT
-from app.tools.citation import enrich_arxiv_metadata
-from app.tools.tavily_search import tavily_search
+from app.tools.academic_search import academic_search
 from app.workflows.states import AgentState
 
 
@@ -16,22 +15,28 @@ class ResearcherAgent:
             log(state, "\n[ResearcherAgent] SKIPPED")
             return state
 
+        # V12: Hybrid academic search (Semantic Scholar + arXiv + Tavily)
         all_results, seen = [], set()
         for q in state.search_queries:
-            for r in tavily_search(q, max_results=5):
+            for r in academic_search(q):
                 if r["url"] not in seen:
                     seen.add(r["url"])
                     all_results.append(r)
             log(state, f"[ResearcherAgent] Query: '{q}' → collected")
 
-        log(state, "[ResearcherAgent] Enriching arxiv sources via Semantic Scholar...")
-        all_results = enrich_arxiv_metadata(all_results)
-
         state.external_context = all_results
 
         # Build numbered input for researcher LLM
+        # Include alphaxiv_url in the source info so agent knows about it
         numbered = "\n\n".join(
-            f"[{i + 1}] Title: {r['title']}\nURL: {r['url']}\nContent: {r['content']}"
+            f"[{i + 1}] Title: {r['title']}\n"
+            f"URL: {r['url']}\n"
+            + (f"AlphaXiv: {r['alphaxiv_url']}\n" if r.get("alphaxiv_url") else "")
+            + f"Type: {r.get('source_type', 'web')}\n"
+            + (f"Authors: {', '.join(r['authors'][:3])}\n" if r.get("authors") else "")
+            + (f"Year: {r['year']}\n" if r.get("year") else "")
+            + (f"Citations: {r['citation_count']}\n" if r.get("citation_count") else "")
+            + f"Content: {r['content']}"
             for i, r in enumerate(all_results)
         )
 
@@ -49,6 +54,9 @@ class ResearcherAgent:
             "source_type": "internal",
         })
 
-        arxiv_count = sum(1 for r in all_results if r.get("source_type") == "arxiv")
-        log(state, f"[ResearcherAgent] {len(all_results)} unique sources ({arxiv_count} arxiv enriched) — notes extracted")
+        academic_count = sum(
+            1 for r in all_results
+            if r.get("source_type") in ("arxiv", "semantic_scholar", "alphaxiv")
+        )
+        log(state, f"[ResearcherAgent] {len(all_results)} unique sources ({academic_count} academic) — notes extracted")
         return state
