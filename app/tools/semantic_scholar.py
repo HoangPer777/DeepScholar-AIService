@@ -1,8 +1,11 @@
 """
-Semantic Scholar search tool — V12 Academic Search.
+Semantic Scholar search tool — V13 Academic Search.
 
 Tìm kiếm papers qua Semantic Scholar Graph API.
 Trả về title, abstract, authors, year, venue, citation_count, url.
+
+V13 changes:
+- Raise RateLimitError on HTTP 429 (caller handles retry/backoff)
 """
 from typing import Dict, List
 
@@ -12,6 +15,11 @@ import requests
 _SS_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 _SS_FIELDS = "title,abstract,authors,year,citationCount,url,venue"
 _REQUEST_TIMEOUT = 10  # seconds
+
+
+class RateLimitError(Exception):
+    """Raised when Semantic Scholar API returns HTTP 429 Too Many Requests."""
+    pass
 
 
 def search_semantic_scholar(query: str, max_results: int = 5) -> List[Dict]:
@@ -46,6 +54,8 @@ def search_semantic_scholar(query: str, max_results: int = 5) -> List[Dict]:
         }
         resp = requests.get(_SS_API_URL, params=params, timeout=_REQUEST_TIMEOUT)
 
+        if resp.status_code == 429:
+            raise RateLimitError(f"Semantic Scholar rate limit (429)")
         if resp.status_code != 200:
             print(f"[SemanticScholar] API error: {resp.status_code}")
             return []
@@ -82,6 +92,8 @@ def search_semantic_scholar(query: str, max_results: int = 5) -> List[Dict]:
 
         return results
 
+    except RateLimitError:
+        raise  # propagate to caller for retry handling
     except Exception as e:
         print(f"[SemanticScholar] Error: {e}")
         return []

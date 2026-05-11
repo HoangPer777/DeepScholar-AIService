@@ -1,17 +1,22 @@
 """
-arXiv search tool — V12 Academic Search.
+arXiv search tool — V13 Academic Search.
 
 Tìm kiếm preprints qua arXiv API với feedparser.
 Trả về abstract đầy đủ (~2000 chars) để agent có thể đọc và trích dẫn.
+
+V13 changes:
+- Raise RateLimitError on HTTP 429 (caller handles retry/backoff)
 """
 from typing import Dict, List
 
 import feedparser
 import requests
 
+from app.tools.semantic_scholar import RateLimitError  # shared exception
+
 
 _ARXIV_API_URL = "http://export.arxiv.org/api/query"
-_REQUEST_TIMEOUT = 10  # seconds
+_REQUEST_TIMEOUT = 8  # seconds — reduced from 10 to fail-fast when rate limited
 
 
 def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
@@ -54,6 +59,8 @@ def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
         )
 
         response = requests.get(url, timeout=_REQUEST_TIMEOUT)
+        if response.status_code == 429:
+            raise RateLimitError(f"arXiv rate limit (429)")
         if response.status_code != 200:
             print(f"[arXiv] API error: {response.status_code}")
             return []
@@ -102,6 +109,8 @@ def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
 
         return results
 
+    except RateLimitError:
+        raise  # propagate to caller for retry handling
     except Exception as e:
         print(f"[arXiv] Error: {e}")
         return []

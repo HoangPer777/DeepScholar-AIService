@@ -1,14 +1,14 @@
 """
-Source filter — V12 Academic Search.
+Source filter — V14 Academic Search.
 
-Lọc low-quality sources và enforce diversity:
-- filter_low_quality_sources: Loại bỏ reddit, quora, linkedin, facebook, twitter, x.com
-- enforce_source_diversity: Ưu tiên academic sources (12) vs web sources (3)
+V14 changes:
+- filter_by_domain(): trusted academic domain allowlist
+- enforce_source_diversity: includes openalex/crossref as academic
 """
 from typing import Dict, List
 
 
-# Low-quality domains to filter out
+# Social media / low-quality domains — always blocked
 LOW_QUALITY_DOMAINS = {
     "reddit.com",
     "quora.com",
@@ -18,77 +18,98 @@ LOW_QUALITY_DOMAINS = {
     "x.com",
 }
 
+# Trusted academic domains — sources from these pass domain filter
+# Web sources (Tavily) bypass this check (source_type == "web")
+_TRUSTED_ACADEMIC_DOMAINS = {
+    "arxiv.org",
+    "semanticscholar.org",
+    "doi.org",
+    "openalex.org",
+    "crossref.org",
+    "neurips.cc",
+    "aclanthology.org",
+    "openreview.net",
+    "proceedings.mlr.press",
+    "ieeexplore.ieee.org",
+    "dl.acm.org",
+    "springer.com",
+    "nature.com",
+    "science.org",
+    "plos.org",
+    "pubmed.ncbi.nlm.nih.gov",
+    "ncbi.nlm.nih.gov",
+    "alphaxiv.org",
+    "huggingface.co",  # model cards / papers
+    "github.com",      # code repos
+}
+
+# Academic source types — these bypass domain check (URL may be opaque DOI)
+_ACADEMIC_SOURCE_TYPES = {"arxiv", "semantic_scholar", "alphaxiv", "openalex", "crossref"}
+
 
 def filter_low_quality_sources(sources: List[Dict]) -> List[Dict]:
-    """
-    Loại bỏ sources từ low-quality domains.
+    """Remove sources from social media / low-quality domains."""
+    if not sources:
+        return []
+    return [
+        s for s in sources
+        if not any(d in (s.get("url") or "").lower() for d in LOW_QUALITY_DOMAINS)
+    ]
 
-    Preconditions:
-    - sources là list of dicts (có thể rỗng)
+
+def filter_by_domain(sources: List[Dict]) -> List[Dict]:
+    """
+    Keep only sources from trusted academic domains.
+
+    Rules:
+    - Academic source types (openalex, semantic_scholar, arxiv, crossref) always pass
+      regardless of URL (DOI URLs may not match domain list)
+    - Web sources (Tavily) always pass — they are supplementary
+    - Other sources must have URL matching a trusted domain
 
     Postconditions:
-    - Trả về filtered list (có thể rỗng)
-    - Sources từ LOW_QUALITY_DOMAINS bị loại bỏ
+    - Sources with source_type in _ACADEMIC_SOURCE_TYPES always included
+    - Sources with source_type == "web" always included (Tavily supplement)
+    - Other sources only included if URL matches _TRUSTED_ACADEMIC_DOMAINS
     - Không raise exception
-
-    Args:
-        sources: List of source dicts
-
-    Returns:
-        Filtered list without low-quality sources
     """
     if not sources:
         return []
 
-    filtered = []
+    result = []
     for source in sources:
+        source_type = source.get("source_type") or "web"
         url = (source.get("url") or "").lower()
 
-        # Check if URL contains any low-quality domain
-        if any(bad_domain in url for bad_domain in LOW_QUALITY_DOMAINS):
+        # Academic sources always pass (DOI URLs may not match domain list)
+        if source_type in _ACADEMIC_SOURCE_TYPES:
+            result.append(source)
             continue
 
-        filtered.append(source)
+        # Web sources (Tavily) always pass as supplementary
+        if source_type == "web":
+            result.append(source)
+            continue
 
-    return filtered
+        # Other sources: check domain allowlist
+        if any(domain in url for domain in _TRUSTED_ACADEMIC_DOMAINS):
+            result.append(source)
+
+    return result
 
 
 def enforce_source_diversity(sources: List[Dict]) -> List[Dict]:
     """
     Enforce source diversity: academic[:12] + web[:3].
 
-    Preconditions:
-    - sources là list of dicts (có thể rỗng)
-
-    Postconditions:
-    - Trả về list với len(academic) <= 12, len(web) <= 3
-    - academic = arxiv + semantic_scholar + alphaxiv
-    - web = tất cả source types khác
-    - Không raise exception
-
     Invariant:
-    - len([s for s in result if s["source_type"] in ("arxiv", "semantic_scholar", "alphaxiv")]) <= 12
-    - len([s for s in result if s["source_type"] not in ("arxiv", "semantic_scholar", "alphaxiv")]) <= 3
-
-    Args:
-        sources: List of source dicts
-
-    Returns:
-        List with enforced diversity (academic[:12] + web[:3])
+    - len(academic) <= 12
+    - len(web) <= 3
     """
     if not sources:
         return []
 
-    academic = []
-    web = []
+    academic = [s for s in sources if (s.get("source_type") or "web") in _ACADEMIC_SOURCE_TYPES]
+    web = [s for s in sources if (s.get("source_type") or "web") not in _ACADEMIC_SOURCE_TYPES]
 
-    for source in sources:
-        source_type = source.get("source_type") or "web"
-
-        if source_type in ("arxiv", "semantic_scholar", "alphaxiv"):
-            academic.append(source)
-        else:
-            web.append(source)
-
-    # Enforce limits
     return academic[:12] + web[:3]
