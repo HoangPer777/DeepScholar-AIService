@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     GROQ_LLM_MODEL: str = "llama-3.1-8b-instant"
     AGENT_LLM_PROVIDER: str = "groq"  # "groq" | "openai" | "google"
 
+    # ============================================================
+    # OPENROUTER (Multi-Model Support — V12)
+    # ============================================================
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

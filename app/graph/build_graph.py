@@ -6,7 +6,7 @@ from app.agents.reader import ReaderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.writer import WriterAgent
-from app.core.llm import get_agent_llm
+from app.core.llm import get_safe_llm
 from app.workflows.states import AgentState
 
 
@@ -21,14 +21,13 @@ def _review_router(state: AgentState) -> str:
 
 
 def build_graph():
-    llm = get_agent_llm()
-
-    planner    = PlannerAgent(llm)
-    clarifier  = ClarifierAgent(llm)
-    researcher = ResearcherAgent(llm)
+    # V12: Per-agent LLM via SafeLLM router (falls back to Groq if no OPENROUTER_API_KEY)
+    planner    = PlannerAgent(get_safe_llm("planner"))
+    clarifier  = ClarifierAgent(get_safe_llm("clarifier"))
+    researcher = ResearcherAgent(get_safe_llm("researcher"))
     reader     = ReaderAgent()       # No LLM needed — pure vector search
-    writer     = WriterAgent(llm)
-    reviewer   = ReviewerAgent(llm)
+    writer     = WriterAgent(get_safe_llm("writer"))
+    reviewer   = ReviewerAgent(get_safe_llm("reviewer"))
 
     graph = StateGraph(AgentState)
 
