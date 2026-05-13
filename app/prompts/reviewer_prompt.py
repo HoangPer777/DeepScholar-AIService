@@ -37,6 +37,4 @@ REWRITE format:
 
 REJECT format (if score < 0.3):
 {"score": 0.25, "decision": "reject", "failed_criteria": ["hallucination", "missing citations", "missing sections"], "feedback": "Too many issues. Multiple hallucinated metrics, missing entire sections, insufficient source citations. Recommend restart with strict source-only approach."}
-"""T format (if score < 0.3):
-{"score": 0.25, "decision": "reject", "failed_criteria": ["hallucination", "missing citations", "missing sections"], "feedback": "Too many issues. Multiple hallucinated metrics, missing entire sections, insufficient source citations. Recommend restart with strict source-only approach."}
 """
