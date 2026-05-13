@@ -36,6 +36,14 @@ _TRUSTED_DOMAINS = {
 
 # Academic source types — always bypass domain check (DOI URLs may not match list)
 _ACADEMIC_SOURCE_TYPES = {"arxiv", "semantic_scholar", "alphaxiv", "openalex", "crossref"}
+
+
+def filter_low_quality_sources(sources: List[Dict]) -> List[Dict]:
+    """Remove sources from known low-quality/social media domains."""
+    if not sources:
+        return []
+    return [
+        s for s in sources
         if not any(d in (s.get("url") or "").lower() for d in LOW_QUALITY_DOMAINS)
     ]
 
@@ -45,24 +53,7 @@ def filter_by_domain(sources: List[Dict]) -> List[Dict]:
     Keep only sources from trusted academic domains.
 
     Rules (in priority order):
-    1Academic source types (openalex, semantic_scholar, arxiv, crossref) → always pass
-    2. Web sources (Tavily, source_type="web") → always pass as supplementary
-    3. All others → must match _TRUSTED_DOMAINS
-    """
-    if not sources:
-        return []
-
-    result = []
-    for source in sources:
-        source_type = source.get("source_type") or "web"
-        url = (source.get("url") or "").lower()
-
-def filter_by_domain(sources: List[Dict]) -> List[Dict]:
-    """
-    Keep only sources from trusted academic domains.
-
-    Rules (in priority order):
-    1. Academic source types → always pass (DOI URLs are opaque)
+    1. Academic source types (openalex, semantic_scholar, arxiv, crossref) → always pass
     2. Web sources (source_type="web") → always pass as supplementary
     3. All others → must match _TRUSTED_DOMAINS
     """
