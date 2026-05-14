@@ -66,4 +66,5 @@ jobs:
               -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
               -e AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" \
               -e AWS_S3_REGION_NAME="${{ secrets.AWS_S3_REGION_NAME }}" \
+              -e OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
               ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
