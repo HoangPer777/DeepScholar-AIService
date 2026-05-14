@@ -7,7 +7,7 @@ V13 changes:
 - Score capped at 0.60 when academic_ratio < 0.3
 - Source list included in LLM input for quality-aware evaluation
 """
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple 
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
