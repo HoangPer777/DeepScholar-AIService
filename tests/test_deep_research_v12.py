@@ -178,11 +178,13 @@ class TestSourceReranker:
 
     def test_citation_bonus_applied(self):
         from app.tools.source_reranker import rerank_sources
+        # Use a query that matches the default title "Test Paper" so sources
+        # pass the relevance threshold and are not dropped before ranking.
         sources = [
             {**_make_source("web", "https://a.com"), "citation_count": 0},
             {**_make_source("web", "https://b.com"), "citation_count": 1000},
         ]
-        result = rerank_sources(sources, "query")
+        result = rerank_sources(sources, "test paper")
         # Higher citation count should rank higher (both web, same type bonus)
         assert result[0]["citation_count"] == 1000
 
@@ -331,13 +333,15 @@ class TestSemanticScholar:
             assert result == []
 
     def test_returns_list_on_bad_status(self):
-        from app.tools.semantic_scholar import search_semantic_scholar
+        from app.tools.semantic_scholar import search_semantic_scholar, RateLimitError
         with patch("app.tools.semantic_scholar.requests.get") as mock_get:
             mock_resp = MagicMock()
             mock_resp.status_code = 429
             mock_get.return_value = mock_resp
-            result = search_semantic_scholar("rag")
-            assert isinstance(result, list)
+            # 429 raises RateLimitError — caller (academic_search) handles it
+            # The test verifies the exception type is correct
+            with pytest.raises(RateLimitError):
+                search_semantic_scholar("rag")
 
     def test_empty_query_returns_empty(self):
         from app.tools.semantic_scholar import search_semantic_scholar
@@ -385,7 +389,7 @@ class TestAcademicSearch:
         """academic_search() không raise exception kể cả khi tất cả APIs fail."""
         from app.tools.academic_search import academic_search
         with patch("app.tools.academic_search.search_semantic_scholar", side_effect=Exception("fail")), \
-             patch("app.tools.academic_search.search_arxiv", side_effect=Exception("fail")), \
+             patch("app.tools.academic_search.search_openalex", side_effect=Exception("fail")), \
              patch("app.tools.academic_search.tavily_search", side_effect=Exception("fail")):
             result = academic_search("transformer")
             assert isinstance(result, list)
@@ -394,11 +398,11 @@ class TestAcademicSearch:
         from app.tools.academic_search import academic_search
 
         ss_result = [{**_make_source("semantic_scholar", "https://ss.org/1"), "citation_count": 10}]
-        ax_result = [{**_make_source("arxiv", "https://arxiv.org/abs/1"), "citation_count": 0}]
+        oa_result = [{**_make_source("openalex", "https://openalex.org/W1"), "citation_count": 0}]
         tv_result = [_make_source("web", "https://blog.com/1")]
 
         with patch("app.tools.academic_search.search_semantic_scholar", return_value=ss_result), \
-             patch("app.tools.academic_search.search_arxiv", return_value=ax_result), \
+             patch("app.tools.academic_search.search_openalex", return_value=oa_result), \
              patch("app.tools.academic_search.tavily_search", return_value=tv_result):
             result = academic_search("test query")
 
@@ -408,12 +412,12 @@ class TestAcademicSearch:
     def test_deduplicates_by_url(self):
         from app.tools.academic_search import academic_search
 
-        duplicate_url = "https://arxiv.org/abs/2401.12345"
+        duplicate_url = "https://openalex.org/W2401"
         ss_result = [{**_make_source("semantic_scholar", duplicate_url), "citation_count": 5}]
-        ax_result = [{**_make_source("arxiv", duplicate_url), "citation_count": 0}]
+        oa_result = [{**_make_source("openalex", duplicate_url), "citation_count": 0}]
 
         with patch("app.tools.academic_search.search_semantic_scholar", return_value=ss_result), \
-             patch("app.tools.academic_search.search_arxiv", return_value=ax_result), \
+             patch("app.tools.academic_search.search_openalex", return_value=oa_result), \
              patch("app.tools.academic_search.tavily_search", return_value=[]):
             result = academic_search("test")
 
@@ -423,16 +427,16 @@ class TestAcademicSearch:
     def test_enforces_diversity(self):
         from app.tools.academic_search import academic_search
 
-        many_arxiv = [{**_make_source("arxiv", f"https://arxiv.org/{i}"), "citation_count": 0} for i in range(20)]
+        many_openalex = [{**_make_source("openalex", f"https://openalex.org/{i}"), "citation_count": 0} for i in range(20)]
         many_web = [_make_source("web", f"https://blog.com/{i}") for i in range(10)]
 
         with patch("app.tools.academic_search.search_semantic_scholar", return_value=[]), \
-             patch("app.tools.academic_search.search_arxiv", return_value=many_arxiv), \
+             patch("app.tools.academic_search.search_openalex", return_value=many_openalex), \
              patch("app.tools.academic_search.tavily_search", return_value=many_web):
             result = academic_search("test")
 
-        academic = [s for s in result if s["source_type"] in ("arxiv", "semantic_scholar", "alphaxiv")]
-        web = [s for s in result if s["source_type"] not in ("arxiv", "semantic_scholar", "alphaxiv")]
+        academic = [s for s in result if s["source_type"] in ("arxiv", "semantic_scholar", "alphaxiv", "openalex", "crossref")]
+        web = [s for s in result if s["source_type"] not in ("arxiv", "semantic_scholar", "alphaxiv", "openalex", "crossref")]
         assert len(academic) <= 12
         assert len(web) <= 3
 
@@ -444,7 +448,7 @@ class TestAcademicSearch:
         """
         from app.tools.academic_search import academic_search
         with patch("app.tools.academic_search.search_semantic_scholar", return_value=[]), \
-             patch("app.tools.academic_search.search_arxiv", return_value=[]), \
+             patch("app.tools.academic_search.search_openalex", return_value=[]), \
              patch("app.tools.academic_search.tavily_search", return_value=[]):
             result = academic_search(query)
             assert isinstance(result, list)

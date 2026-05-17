@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
+    # ============================================================
+    # REDIS (Short-Term Memory — Memory Chatbot)
+    # ============================================================
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
