@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class ChatResponse(BaseModel):
 	session_id: str | None = None
-	article_id: int
+	article_id: int | None = None
 	answer: str
 	citations: list[dict[str, Any]] = Field(default_factory=list)
 	confidence_score: float
