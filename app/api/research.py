@@ -16,12 +16,13 @@ _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 _jobs: dict = {}
 
 
-def _build_response(result: dict) -> dict:
+def _build_response(result: dict, task_id: str) -> dict:
     raw_sources = [
         s for s in result.get("external_context", [])
         if s.get("title") != "__research_notes__"
     ]
     return {
+        "session_id": task_id,
         "answer": result.get("reviewed_answer") or result.get("draft_answer") or "",
         "sources": [
             {
@@ -55,9 +56,9 @@ async def _run_job(task_id: str, question: str):
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             _executor,  # Use dedicated executor, not default (prevents saturation)
-            lambda: run_chat_workflow(question=question, article_id=None)
+            lambda: run_chat_workflow(question=question, article_id=None, session_id=task_id)
         )
-        _jobs[task_id] = {"status": "done", "result": _build_response(result)}
+        _jobs[task_id] = {"status": "done", "result": _build_response(result, task_id)}
     except Exception as e:
         _jobs[task_id] = {"status": "error", "error": str(e)}
 
