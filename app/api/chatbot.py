@@ -1,11 +1,17 @@
 """
 Chatbot API endpoints.
 
-Implements dual-write pattern for chat history persistence:
-  POST /api/chat/ → run workflow → save to Redis (TTL 24h) + PostgreSQL (permanent)
+Implements async job pattern for follow-up chat (same as research.py):
+  POST /api/chat/start → returns task_id immediately
+  GET  /api/chat/status/{task_id} → poll until done
+
+Also implements dual-write pattern for chat history persistence:
+  POST /api/chat/ → (legacy sync endpoint, kept for backward compat)
   GET  /api/chat/history/{session_id} → try Redis first → fallback to PostgreSQL
 """
 
+import asyncio
+import concurrent.futures
 import logging
 import uuid
 
@@ -26,6 +32,101 @@ router = APIRouter()
 
 _message_store = MessageStore()
 
+# Dedicated thread pool — prevents event loop blocking during long LLM calls
+# Shared with research.py pattern for consistency
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# In-memory job store for async chat jobs: task_id -> {"status": ..., "result": ..., "error": ...}
+_chat_jobs: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# Async job pattern (used by follow-up chat to avoid proxy timeout)
+# ---------------------------------------------------------------------------
+
+def _build_chat_response(result: dict, session_id: str, article_id) -> dict:
+    """Build serializable chat response dict from workflow result."""
+    answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
+    citations = _extract_citations(result)
+    return {
+        "session_id": result.get("session_id") or session_id,
+        "article_id": article_id,
+        "answer": answer,
+        "citations": citations,
+        "confidence_score": result.get("confidence_score", 0.0),
+        "review_feedback": result.get("review_feedback"),
+        "need_clarification": result.get("need_clarification", False),
+        "clarification_question": result.get("clarified_question"),
+    }
+
+
+async def _run_chat_job(task_id: str, question: str, article_id, session_id: str):
+    """Run chat workflow in thread pool and store result in _chat_jobs."""
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _executor,
+            lambda: run_chat_workflow(
+                question=question,
+                article_id=article_id,
+                session_id=session_id,
+            ),
+        )
+
+        answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
+
+        # Dual-write after workflow completes
+        _persist_to_postgres(
+            session_id=session_id,
+            question=question,
+            answer=answer,
+            confidence_score=result.get("confidence_score", 0.0),
+            citations=_extract_citations(result),
+        )
+        _persist_to_redis(session_id=session_id, question=question, answer=answer)
+
+        _chat_jobs[task_id] = {
+            "status": "done",
+            "result": _build_chat_response(result, session_id, article_id),
+        }
+    except Exception as e:
+        logger.error("Chat job %s failed: %s", task_id, e)
+        _chat_jobs[task_id] = {"status": "error", "error": str(e)}
+
+
+@router.post("/start")
+async def chat_start(request: ChatRequest):
+    """
+    Start async chat job. Returns task_id immediately.
+    Client should poll GET /status/{task_id} until status == 'done'.
+
+    This avoids Vercel serverless proxy timeout (60s) for long LLM workflows.
+    """
+    task_id = str(uuid.uuid4())
+    session_id = request.session_id or str(uuid.uuid4())
+
+    _chat_jobs[task_id] = {"status": "pending", "session_id": session_id}
+    asyncio.create_task(
+        _run_chat_job(task_id, request.question, request.article_id, session_id)
+    )
+    return {"task_id": task_id, "session_id": session_id, "status": "pending"}
+
+
+@router.get("/status/{task_id}")
+async def chat_status(task_id: str):
+    """Poll chat job status. Returns result when done."""
+    job = _chat_jobs.get(task_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Chat task not found")
+    if job["status"] == "error":
+        raise HTTPException(status_code=500, detail=job["error"])
+    if job["status"] == "done":
+        result = job["result"]
+        del _chat_jobs[task_id]
+        return {"status": "done", **result}
+    # Return session_id in pending response so frontend can track it
+    return {"status": "pending", "session_id": job.get("session_id")}
+
 
 @router.post("/")
 async def chat(request: ChatRequest):
@@ -33,15 +134,22 @@ async def chat(request: ChatRequest):
     Run full agentic pipeline: Planner → Clarifier → Researcher → Reader → Writer → Reviewer.
 
     Dual-write: saves messages to Redis (short-term, TTL 24h) AND PostgreSQL (permanent).
+    Runs workflow in a thread executor to avoid blocking the FastAPI event loop.
     """
     try:
         # Generate session_id if not provided
         session_id = request.session_id or str(uuid.uuid4())
 
-        result = run_chat_workflow(
-            question=request.question,
-            article_id=request.article_id,
-            session_id=session_id,
+        # Run blocking LLM workflow in thread pool — keeps event loop free for
+        # concurrent polling requests and other follow-up calls
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _executor,
+            lambda: run_chat_workflow(
+                question=request.question,
+                article_id=request.article_id,
+                session_id=session_id,
+            ),
         )
 
         answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
