@@ -1,7 +1,16 @@
+import re
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.prompts.fast_chat_prompt import FAST_CHAT_SYSTEM_PROMPT
 from app.schemas.chat_models import ContextWindow
+
+
+_INLINE_CITATION_RE = re.compile(r"\s*\[\d+(?:\s*,\s*\d+)*\]")
+
+
+def _strip_inline_citations(text: str) -> str:
+    return _INLINE_CITATION_RE.sub("", text)
 
 
 class FastChatAgent:
@@ -33,12 +42,6 @@ class FastChatAgent:
         """
         report = context.research_report
 
-        # Build numbered source list — cap at 20 (Requirement 3.4)
-        sources_text = "\n".join(
-            f"[{s.index}] {s.title} ({s.url})"
-            for s in context.sources[:20]
-        )
-
         # Last 10 messages from conversation history (Requirement 3.4)
         history_text = "\n".join(
             f"{m.role.upper()}: {m.content}"
@@ -47,7 +50,6 @@ class FastChatAgent:
 
         user_content = (
             f"RESEARCH REPORT:\n{report.answer if report else 'N/A'}\n\n"
-            f"SOURCES:\n{sources_text}\n\n"
             f"CONVERSATION HISTORY:\n{history_text}\n\n"
             f"FOLLOW-UP QUESTION: {question}"
         )
@@ -59,8 +61,8 @@ class FastChatAgent:
         ])
 
         return {
-            "answer": response.content,
-            "citations": [s.model_dump() for s in context.sources[:20]],
+            "answer": _strip_inline_citations(response.content),
+            "citations": [],
             "confidence_score": 0.85,  # fast chat is high-confidence by design
             "need_clarification": False,
             "is_fast_chat": True,

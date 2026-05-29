@@ -289,3 +289,35 @@ def test_follow_up_response_has_is_fast_chat_field():
 
     assert "export interface FollowUpResponse" in content
     assert "is_fast_chat?: boolean" in content
+
+
+def test_fast_chat_omits_citations_and_strips_inline_markers():
+    """
+    Fast Chat Mode should not expose citations because follow-up answers are
+    optimized for speed and may not have reliable source-level grounding.
+    """
+    from unittest.mock import MagicMock
+
+    from app.agents.fast_chat import FastChatAgent
+    from app.schemas.chat_models import ContextWindow, ResearchReport, Source
+
+    mock_response = MagicMock()
+    mock_response.content = "BM25 is a sparse retrieval method [1]. FAISS uses dense vectors [2]."
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = mock_response
+
+    context = ContextWindow(
+        session_id="test-session",
+        research_report=ResearchReport(answer="Research report"),
+        sources=[
+            Source(index=1, type="url", title="Source 1", url="https://example.com/1"),
+            Source(index=2, type="url", title="Source 2", url="https://example.com/2"),
+        ],
+    )
+
+    result = FastChatAgent(mock_llm).run("Explain BM25 and FAISS", context)
+
+    assert result["is_fast_chat"] is True
+    assert result["citations"] == []
+    assert "[1]" not in result["answer"]
+    assert "[2]" not in result["answer"]
