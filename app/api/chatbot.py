@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.core.job_store import get_job_store
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.core.message_store import MessageStore
 from app.schemas.chat_models import Message, MessageRole
@@ -36,18 +37,29 @@ _message_store = MessageStore()
 # Shared with research.py pattern for consistency
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# In-memory job store for async chat jobs: task_id -> {"status": ..., "result": ..., "error": ...}
-_chat_jobs: dict = {}
+# Persistent job store backed by Redis (falls back to in-memory when Redis is unavailable)
+# Requirements: 2.1, 2.5, 3.5, 7.2
+_job_store = get_job_store()
 
 
 # ---------------------------------------------------------------------------
 # Async job pattern (used by follow-up chat to avoid proxy timeout)
 # ---------------------------------------------------------------------------
 
+def _answer_from_result(result: dict) -> str:
+    return result.get("answer") or result.get("reviewed_answer") or result.get("draft_answer") or ""
+
+
+def _citations_from_result(result: dict) -> list:
+    if result.get("is_fast_chat") and isinstance(result.get("citations"), list):
+        return result["citations"]
+    return _extract_citations(result)
+
+
 def _build_chat_response(result: dict, session_id: str, article_id) -> dict:
     """Build serializable chat response dict from workflow result."""
-    answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
-    citations = _extract_citations(result)
+    answer = _answer_from_result(result)
+    citations = _citations_from_result(result)
     return {
         "session_id": result.get("session_id") or session_id,
         "article_id": article_id,
@@ -57,12 +69,34 @@ def _build_chat_response(result: dict, session_id: str, article_id) -> dict:
         "review_feedback": result.get("review_feedback"),
         "need_clarification": result.get("need_clarification", False),
         "clarification_question": result.get("clarified_question"),
+        "is_fast_chat": result.get("is_fast_chat", False),
     }
 
 
-async def _run_chat_job(task_id: str, question: str, article_id, session_id: str):
+def _has_research_context(session_id: str) -> bool:
+    redis_client = redis_lib.from_url(settings.REDIS_URL)
+    try:
+        store = MemoryStore(redis_client)
+        context = store.get_context_window(session_id)
+        return context.research_report is not None
+    finally:
+        redis_client.close()
+
+
+async def _run_chat_job(
+    task_id: str,
+    question: str,
+    article_id,
+    session_id: str,
+    require_context: bool = False,
+):
     """Run chat workflow in thread pool and store result in _chat_jobs."""
     try:
+        if require_context and not _has_research_context(session_id):
+            raise SessionContextNotFoundError(
+                f"Session '{session_id}' not found or has no research context."
+            )
+
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             _executor,
@@ -73,7 +107,8 @@ async def _run_chat_job(task_id: str, question: str, article_id, session_id: str
             ),
         )
 
-        answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
+        answer = _answer_from_result(result)
+        citations = _citations_from_result(result)
 
         # Dual-write after workflow completes
         _persist_to_postgres(
@@ -81,17 +116,26 @@ async def _run_chat_job(task_id: str, question: str, article_id, session_id: str
             question=question,
             answer=answer,
             confidence_score=result.get("confidence_score", 0.0),
-            citations=_extract_citations(result),
+            citations=citations,
         )
-        _persist_to_redis(session_id=session_id, question=question, answer=answer)
+        if not result.get("is_fast_chat"):
+            _persist_to_redis(session_id=session_id, question=question, answer=answer)
 
-        _chat_jobs[task_id] = {
+        _job_store.update_job(task_id, {
             "status": "done",
             "result": _build_chat_response(result, session_id, article_id),
-        }
+        })
+    except SessionContextNotFoundError:
+        # Requirement 3.5: return 404 when session has no research context
+        logger.warning("Chat job %s: session '%s' not found or has no research context", task_id, session_id)
+        _job_store.update_job(task_id, {
+            "status": "error",
+            "error": f"Session '{session_id}' not found or has no research context. Please start a deep research session first.",
+            "error_code": 404,
+        })
     except Exception as e:
         logger.error("Chat job %s failed: %s", task_id, e)
-        _chat_jobs[task_id] = {"status": "error", "error": str(e)}
+        _job_store.update_job(task_id, {"status": "error", "error": str(e)})
 
 
 @router.post("/start")
@@ -104,10 +148,17 @@ async def chat_start(request: ChatRequest):
     """
     task_id = str(uuid.uuid4())
     session_id = request.session_id or str(uuid.uuid4())
+    require_context = request.session_id is not None
 
-    _chat_jobs[task_id] = {"status": "pending", "session_id": session_id}
+    _job_store.create_job(task_id, {"status": "pending", "session_id": session_id})
     asyncio.create_task(
-        _run_chat_job(task_id, request.question, request.article_id, session_id)
+        _run_chat_job(
+            task_id,
+            request.question,
+            request.article_id,
+            session_id,
+            require_context=require_context,
+        )
     )
     return {"task_id": task_id, "session_id": session_id, "status": "pending"}
 
@@ -115,14 +166,15 @@ async def chat_start(request: ChatRequest):
 @router.get("/status/{task_id}")
 async def chat_status(task_id: str):
     """Poll chat job status. Returns result when done."""
-    job = _chat_jobs.get(task_id)
+    job = _job_store.get_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Chat task not found")
     if job["status"] == "error":
-        raise HTTPException(status_code=500, detail=job["error"])
+        status_code = job.get("error_code", 500)
+        raise HTTPException(status_code=status_code, detail=job["error"])
     if job["status"] == "done":
         result = job["result"]
-        del _chat_jobs[task_id]
+        _job_store.delete_job(task_id)
         return {"status": "done", **result}
     # Return session_id in pending response so frontend can track it
     return {"status": "pending", "session_id": job.get("session_id")}
@@ -152,7 +204,8 @@ async def chat(request: ChatRequest):
             ),
         )
 
-        answer = result.get("reviewed_answer") or result.get("draft_answer") or ""
+        answer = _answer_from_result(result)
+        citations = _citations_from_result(result)
 
         # --- Dual-write: persist to PostgreSQL ---
         _persist_to_postgres(
@@ -160,21 +213,22 @@ async def chat(request: ChatRequest):
             question=request.question,
             answer=answer,
             confidence_score=result.get("confidence_score", 0.0),
-            citations=_extract_citations(result),
+            citations=citations,
         )
 
         # --- Dual-write: persist to Redis (short-term cache) ---
-        _persist_to_redis(
-            session_id=session_id,
-            question=request.question,
-            answer=answer,
-        )
+        if not result.get("is_fast_chat"):
+            _persist_to_redis(
+                session_id=session_id,
+                question=request.question,
+                answer=answer,
+            )
 
         return ChatResponse(
             session_id=result.get("session_id") or session_id,
             article_id=request.article_id,
             answer=answer,
-            citations=_extract_citations(result),
+            citations=citations,
             confidence_score=result.get("confidence_score", 0.0),
             review_feedback=result.get("review_feedback"),
             need_clarification=result.get("need_clarification", False),

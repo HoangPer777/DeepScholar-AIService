@@ -1,5 +1,6 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.llm_cache import get_planner_cache
 from app.core.utils import log, safe_json
 from app.prompts.planner_prompt import PLANNER_PROMPT
 from app.workflows.states import AgentState
@@ -10,6 +11,16 @@ class PlannerAgent:
         self.llm = llm
 
     def run(self, state: AgentState) -> AgentState:
+        cache = get_planner_cache()
+        cached = cache.get(state.question)
+        if cached:
+            log(state, "[PlannerAgent] Cache HIT")
+            state.need_clarification = cached.get("need_clarification", False)
+            state.need_external_search = cached.get("need_external_search", True)
+            state.focus_sections = cached.get("focus_sections", [])
+            state.search_queries = cached.get("search_queries", [state.question])
+            return state
+
         response = self.llm.invoke([
             SystemMessage(content=PLANNER_PROMPT),
             HumanMessage(content=state.question),
@@ -20,6 +31,8 @@ class PlannerAgent:
         state.need_external_search = data.get("need_external_search", True)
         state.focus_sections = data.get("focus_sections", [])
         state.search_queries = data.get("search_queries", [state.question])
+
+        cache.set(state.question, data)
 
         log(state, f"\n{'=' * 60}\n[PlannerAgent]")
         log(state, f"  need_clarification   : {state.need_clarification}")
