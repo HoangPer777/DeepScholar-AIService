@@ -519,6 +519,28 @@ class TestResearchAPIContract:
         resp2 = client.get(f"/api/research/status/{fake_task_id}")
         assert resp2.status_code == 404
 
+    def test_debug_timings_are_opt_in(self):
+        """timings should only be included when debug=True."""
+        from app.api.research import _build_response
+
+        result = self._mock_research_result()
+        result["timings"] = {"planner_ms": 10, "total_latency_ms": 25}
+
+        normal = _build_response(result, "task-1")
+        debug = _build_response(result, "task-1", include_timings=True)
+
+        assert "timings" not in normal
+        assert debug["timings"]["planner_ms"] == 10
+        assert debug["timings"]["total_latency_ms"] == 25
+
+    def test_research_request_accepts_message_alias(self):
+        from app.schemas.request import ResearchRequest
+
+        req = ResearchRequest.model_validate({"message": "What is RAG?", "debug": True})
+
+        assert req.query == "What is RAG?"
+        assert req.debug is True
+
 
 # ===========================================================================
 # 6. MemoryStore + SessionManager integration

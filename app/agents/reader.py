@@ -17,6 +17,7 @@ class ReaderAgent:
                 question=effective_question(state),
                 focus_sections=state.focus_sections,
                 limit=8,
+                timings=state.timings,
             )
             state.vector_context = [
                 {

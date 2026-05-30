@@ -41,6 +41,7 @@ class AgentState(BaseModel):
 
     # To track agent execution flow
     logs: List[str] = Field(default_factory=list)
+    timings: Dict[str, int] = Field(default_factory=dict)
 
     # NEW: timing metadata for observability (Requirement 8.1)
     # Populated by the workflow routing layer, not the agents themselves

@@ -53,12 +53,12 @@ class _JobStoreMappingAdapter:
 _jobs = _JobStoreMappingAdapter()
 
 
-def _build_response(result: dict, task_id: str) -> dict:
+def _build_response(result: dict, task_id: str, include_timings: bool = False) -> dict:
     raw_sources = [
         s for s in result.get("external_context", [])
         if s.get("title") != "__research_notes__"
     ]
-    return {
+    response = {
         "session_id": task_id,
         "answer": result.get("reviewed_answer") or result.get("draft_answer") or "",
         "sources": [
@@ -86,16 +86,22 @@ def _build_response(result: dict, task_id: str) -> dict:
         "decision": "accept" if result.get("reviewed_answer") else "rewrite (max iterations reached)",
         "review_feedback":   result.get("review_feedback"),
     }
+    if include_timings:
+        response["timings"] = result.get("timings", {})
+    return response
 
 
-async def _run_job(task_id: str, question: str):
+async def _run_job(task_id: str, question: str, debug: bool = False):
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             _executor,  # Use dedicated executor, not default (prevents saturation)
             lambda: run_chat_workflow(question=question, article_id=None, session_id=task_id)
         )
-        _job_store.update_job(task_id, {"status": "done", "result": _build_response(result, task_id)})
+        _job_store.update_job(
+            task_id,
+            {"status": "done", "result": _build_response(result, task_id, include_timings=debug)},
+        )
     except Exception as e:
         _job_store.update_job(task_id, {"status": "error", "error": str(e)})
 
@@ -107,8 +113,8 @@ async def deep_research(request: ResearchRequest):
     Client should poll GET /status/{task_id} until status == 'done'.
     """
     task_id = str(uuid.uuid4())
-    _job_store.create_job(task_id, {"status": "pending"})
-    asyncio.create_task(_run_job(task_id, request.query))
+    _job_store.create_job(task_id, {"status": "pending", "debug": request.debug})
+    asyncio.create_task(_run_job(task_id, request.query, request.debug))
     return {"task_id": task_id, "status": "pending"}
 
 

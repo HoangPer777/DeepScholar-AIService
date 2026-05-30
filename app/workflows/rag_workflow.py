@@ -36,6 +36,10 @@ from app.workflows.states import AgentState
 logger = logging.getLogger(__name__)
 
 
+def _elapsed_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
+
+
 # ---------------------------------------------------------------------------
 # Helper: persist fast-chat messages to conversation history
 # ---------------------------------------------------------------------------
@@ -199,13 +203,40 @@ def run_chat_workflow(
     """
     # ── Task 7.3: record start time ──────────────────────────────────────────
     start_time = time.time()
+    start_perf = time.perf_counter()
+    timings: dict[str, int] = {
+        "context_lookup_ms": 0,
+        "planner_ms": 0,
+        "clarifier_ms": 0,
+        "researcher_ms": 0,
+        "reader_ms": 0,
+        "keyword_search_ms": 0,
+        "embedding_ms": 0,
+        "vector_search_ms": 0,
+        "merge_rank_ms": 0,
+        "load_parents_ms": 0,
+        "intent_ms": 0,
+        "tenant_lookup_ms": 0,
+        "total_retrieval_ms": 0,
+        "retrieval_ms": 0,
+        "writer_ms": 0,
+        "reviewer_ms": 0,
+        "external_search_collect_ms": 0,
+        "external_search_retry_ms": 0,
+        "researcher_llm_ms": 0,
+        "context_save_ms": 0,
+        "fast_answer_ms": 0,
+        "total_latency_ms": 0,
+    }
 
     # ── Task 7.1: Research_Context routing ───────────────────────────────────
     if session_id:
         redis_client = redis_lib.from_url(settings.REDIS_URL)
         try:
+            t0 = time.perf_counter()
             store = MemoryStore(redis_client)
             context = store.get_context_window(session_id)
+            timings["context_lookup_ms"] = _elapsed_ms(t0)
 
             if context.research_report is not None:
                 # ── Fast Chat Mode ────────────────────────────────────────────
@@ -214,12 +245,16 @@ def run_chat_workflow(
                 )
 
                 agent = FastChatAgent(get_safe_llm("fast_chat"))
+                t0 = time.perf_counter()
                 result = agent.run(question, context)
+                timings["fast_answer_ms"] = _elapsed_ms(t0)
 
                 # Persist question + answer to conversation history
                 _persist_fast_chat(store, session_id, question, result["answer"])
 
                 elapsed = time.time() - start_time
+                timings["total_latency_ms"] = _elapsed_ms(start_perf)
+                result["timings"] = timings
                 logger.info(
                     "run_chat_workflow: fast_chat completed in %.2fs for session=%s",
                     elapsed,
@@ -262,32 +297,44 @@ def run_chat_workflow(
 
     # ── Planner ──────────────────────────────────────────────────────────────
     t0 = time.time()
+    p0 = time.perf_counter()
     state = planner.run(state)
     state.planner_time = time.time() - t0
+    state.timings["planner_ms"] = _elapsed_ms(p0)
     logger.debug("planner_time=%.2fs", state.planner_time)
 
     # ── Clarifier ────────────────────────────────────────────────────────────
+    p0 = time.perf_counter()
     state = clarifier.run(state)
+    state.timings["clarifier_ms"] = _elapsed_ms(p0)
 
     # ── Researcher ───────────────────────────────────────────────────────────
     t0 = time.time()
+    p0 = time.perf_counter()
     state = researcher.run(state)
     state.researcher_time = time.time() - t0
+    state.timings["researcher_ms"] = _elapsed_ms(p0)
     logger.debug("researcher_time=%.2fs", state.researcher_time)
 
     # ── Reader ───────────────────────────────────────────────────────────────
+    p0 = time.perf_counter()
     state = reader.run(state)
+    state.timings["reader_ms"] = _elapsed_ms(p0)
 
     # ── Writer → Reviewer loop (mirrors _review_router in build_graph.py) ────
     while True:
         t0 = time.time()
+        p0 = time.perf_counter()
         state = writer.run(state)
         state.writer_time = time.time() - t0
+        state.timings["writer_ms"] = state.timings.get("writer_ms", 0) + _elapsed_ms(p0)
         logger.debug("writer_time=%.2fs", state.writer_time)
 
         t0 = time.time()
+        p0 = time.perf_counter()
         state = reviewer.run(state)
         state.reviewer_time = time.time() - t0
+        state.timings["reviewer_ms"] = state.timings.get("reviewer_ms", 0) + _elapsed_ms(p0)
         logger.debug("reviewer_time=%.2fs", state.reviewer_time)
 
         # Replicate _review_router logic from build_graph.py
@@ -304,10 +351,14 @@ def run_chat_workflow(
 
     # ── Task 7.2: save Research_Context after pipeline ───────────────────────
     if session_id and result.get("reviewed_answer"):
+        p0 = time.perf_counter()
         _save_research_context(session_id, result)
+        state.timings["context_save_ms"] = _elapsed_ms(p0)
 
     # ── Task 7.3: log total elapsed + slow-query warning ─────────────────────
     elapsed = time.time() - start_time
+    state.timings["total_latency_ms"] = _elapsed_ms(start_perf)
+    result["timings"] = {**timings, **state.timings}
     logger.info(
         "run_chat_workflow: full_pipeline completed in %.2fs "
         "(planner=%.2fs researcher=%.2fs writer=%.2fs reviewer=%.2fs) session=%s",

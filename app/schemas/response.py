@@ -12,3 +12,4 @@ class ChatResponse(BaseModel):
 	review_feedback: str | None = None
 	need_clarification: bool = False
 	clarification_question: str | None = None
+	timings: dict[str, int] | None = None

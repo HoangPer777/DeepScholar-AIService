@@ -15,6 +15,7 @@ V15 changes:
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
@@ -124,7 +125,9 @@ class ResearcherAgent:
             return state
 
         # Initial fetch (parallel)
+        t0 = time.perf_counter()
         all_results = _collect_sources_parallel(deduped_queries)
+        state.timings["external_search_collect_ms"] = int((time.perf_counter() - t0) * 1000)
         for q in deduped_queries:
             log(state, f"[ResearcherAgent] Query: '{q}' → collected")
 
@@ -135,7 +138,9 @@ class ResearcherAgent:
             # Broaden the first query with "survey overview" to get more academic hits
             base_query = deduped_queries[0]
             broader_query = f"{base_query} survey overview"
+            t0 = time.perf_counter()
             extra = _collect_sources([broader_query])
+            state.timings["external_search_retry_ms"] = int((time.perf_counter() - t0) * 1000)
             # Merge, dedup by URL
             existing_urls = {r.get("url") for r in all_results if r.get("url")}
             for r in extra:
@@ -161,10 +166,12 @@ class ResearcherAgent:
             for i, r in enumerate(all_results)
         )
 
+        t0 = time.perf_counter()
         res = self.llm.invoke([
             SystemMessage(content=RESEARCHER_PROMPT),
             HumanMessage(content=f"Research question: {effective_question(state)}\n\nSources:\n{numbered}"),
         ])
+        state.timings["researcher_llm_ms"] = int((time.perf_counter() - t0) * 1000)
 
         state.external_context.insert(0, {
             "title":       "__research_notes__",

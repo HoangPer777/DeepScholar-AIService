@@ -56,11 +56,11 @@ def _citations_from_result(result: dict) -> list:
     return _extract_citations(result)
 
 
-def _build_chat_response(result: dict, session_id: str, article_id) -> dict:
+def _build_chat_response(result: dict, session_id: str, article_id, include_timings: bool = False) -> dict:
     """Build serializable chat response dict from workflow result."""
     answer = _answer_from_result(result)
     citations = _citations_from_result(result)
-    return {
+    response = {
         "session_id": result.get("session_id") or session_id,
         "article_id": article_id,
         "answer": answer,
@@ -71,6 +71,9 @@ def _build_chat_response(result: dict, session_id: str, article_id) -> dict:
         "clarification_question": result.get("clarified_question"),
         "is_fast_chat": result.get("is_fast_chat", False),
     }
+    if include_timings:
+        response["timings"] = result.get("timings", {})
+    return response
 
 
 def _has_research_context(session_id: str) -> bool:
@@ -89,6 +92,7 @@ async def _run_chat_job(
     article_id,
     session_id: str,
     require_context: bool = False,
+    debug: bool = False,
 ):
     """Run chat workflow in thread pool and store result in _chat_jobs."""
     try:
@@ -123,7 +127,7 @@ async def _run_chat_job(
 
         _job_store.update_job(task_id, {
             "status": "done",
-            "result": _build_chat_response(result, session_id, article_id),
+            "result": _build_chat_response(result, session_id, article_id, include_timings=debug),
         })
     except SessionContextNotFoundError:
         # Requirement 3.5: return 404 when session has no research context
@@ -150,7 +154,7 @@ async def chat_start(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     require_context = request.session_id is not None
 
-    _job_store.create_job(task_id, {"status": "pending", "session_id": session_id})
+    _job_store.create_job(task_id, {"status": "pending", "session_id": session_id, "debug": request.debug})
     asyncio.create_task(
         _run_chat_job(
             task_id,
@@ -158,6 +162,7 @@ async def chat_start(request: ChatRequest):
             request.article_id,
             session_id,
             require_context=require_context,
+            debug=request.debug,
         )
     )
     return {"task_id": task_id, "session_id": session_id, "status": "pending"}
@@ -233,7 +238,8 @@ async def chat(request: ChatRequest):
             review_feedback=result.get("review_feedback"),
             need_clarification=result.get("need_clarification", False),
             clarification_question=result.get("clarified_question"),
-        )
+            timings=result.get("timings") if request.debug else None,
+        ).model_dump(exclude_none=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
