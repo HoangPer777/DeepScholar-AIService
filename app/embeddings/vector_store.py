@@ -146,6 +146,13 @@ def _heading_path_from_text(raw: str | None) -> list[str]:
     return [part.strip() for part in raw.split(">") if part.strip()]
 
 
+def _safe_section(section: str | None) -> str:
+    normalized = normalize_section_name(section)
+    if len(normalized) > 128:
+        raise ValueError(f"Normalized section exceeds 128 characters: {normalized!r}")
+    return normalized
+
+
 def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
     """
     Legacy fallback ingestion for plain string chunks.
@@ -200,7 +207,7 @@ def ingest_paper_chunks(article_id: int, chunks: list[PaperChunk]) -> dict:
                     article_id=article_id,
                     chunk_index=i,
                     content=chunk.content,
-                    section=chunk.section,
+                    section=_safe_section(chunk.section or chunk.section_title),
                     section_title=chunk.section_title,
                     chunk_type=chunk.chunk_type,
                     heading_path=_heading_path_to_text(chunk.heading_path),

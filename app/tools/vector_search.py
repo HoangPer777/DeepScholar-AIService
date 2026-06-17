@@ -24,7 +24,12 @@ def search_article_chunks(
         timings["embedding_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t0 = time.perf_counter()
-    results = similarity_search(article_id, query_embedding, limit=limit)
+    results = similarity_search(
+        article_id,
+        query_embedding,
+        limit=limit,
+        focus_sections=focus_sections,
+    )
     if timings is not None:
         timings["vector_search_ms"] = int((time.perf_counter() - t0) * 1000)
         timings["total_retrieval_ms"] = int((time.perf_counter() - retrieval_start) * 1000)
