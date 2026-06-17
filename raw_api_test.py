@@ -7,8 +7,9 @@ dotenv_path = r"d:\aaa\aa_study_document\a_year 4 semester 2\Graduation Project\
 load_dotenv(dotenv_path)
 
 api_key = os.getenv("GOOGLE_API_KEY")
+__test__ = False
 
-def test_endpoint(version, model):
+def check_endpoint(version, model):
     url = f"https://generativelanguage.googleapis.com/{version}/{model}:embedContent?key={api_key}"
     payload = {
         "model": model,
@@ -20,7 +21,7 @@ def test_endpoint(version, model):
     
     print(f"\nTesting {version} with {model}...")
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
         print(f"Status Code: {response.status_code}")
         if response.status_code == 200:
             print("Success!")
@@ -30,11 +31,12 @@ def test_endpoint(version, model):
     except Exception as e:
         print(f"Exception: {e}")
 
-if not api_key:
-    print("No API Key found")
-else:
-    # Test common combinations
-    test_endpoint("v1", "models/text-embedding-004")
-    test_endpoint("v1beta", "models/text-embedding-004")
-    test_endpoint("v1", "models/embedding-001")
-    test_endpoint("v1beta", "models/embedding-001")
+if __name__ == "__main__":
+    if not api_key:
+        print("No API Key found")
+    else:
+        # Test common combinations
+        check_endpoint("v1", "models/text-embedding-004")
+        check_endpoint("v1beta", "models/text-embedding-004")
+        check_endpoint("v1", "models/embedding-001")
+        check_endpoint("v1beta", "models/embedding-001")

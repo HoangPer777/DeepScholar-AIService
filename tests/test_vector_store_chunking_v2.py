@@ -46,6 +46,7 @@ def test_article_chunk_schema_contains_v2_metadata_columns():
         "created_at",
     }.issubset(columns)
     assert Embedding.__table__.columns["embedding"] is not None
+    assert ArticleChunk.__table__.columns["section_title"].type.__class__.__name__ == "Text"
 
 
 class FakeQuery:

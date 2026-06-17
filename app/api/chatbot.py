@@ -229,7 +229,7 @@ async def chat(request: ChatRequest):
                 answer=answer,
             )
 
-        return ChatResponse(
+        response_payload = ChatResponse(
             session_id=result.get("session_id") or session_id,
             article_id=request.article_id,
             answer=answer,
@@ -240,6 +240,8 @@ async def chat(request: ChatRequest):
             clarification_question=result.get("clarified_question"),
             timings=result.get("timings") if request.debug else None,
         ).model_dump(exclude_none=True)
+        response_payload["article_id"] = request.article_id
+        return response_payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -265,6 +267,11 @@ async def chat_history(session_id: str):
         logger.warning("Redis history lookup failed for session %s: %s", session_id, exc)
     finally:
         redis_client.close()
+
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        return {"session_id": session_id, "history": [], "source": "invalid_session_id"}
 
     # --- Fallback: PostgreSQL (survives Docker restarts) ---
     db = SessionLocal()
