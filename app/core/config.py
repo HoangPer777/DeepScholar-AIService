@@ -24,10 +24,20 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
-    EMBEDDING_PROVIDER: str = "openai"  # Options: "openai", "google", "huggingface"
+    EMBEDDING_PROVIDER: str = "google"  # Options: "openai", "google", "huggingface"
     EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    EMBEDDING_DIMENSION: int = 768  # Read from .env; must match the model output size
+    EMBEDDING_DIMENSION: int = 3072  # Read from .env; must match the model output size
+    GOOGLE_EMBEDDING_MODEL: str = "models/gemini-embedding-2-preview"
     GOOGLE_API_KEY: str = ""
+    GOOGLE_EMBEDDING_MAX_RETRIES: int = 6
+    GOOGLE_EMBEDDING_RETRY_BASE_SECONDS: float = 2.0
+    GOOGLE_EMBEDDING_REQUEST_DELAY_SECONDS: float = 1.0
+    CHUNKING_STRATEGY: str = "paper_structure"
+    CHUNKING_VERSION: str = "v2"
+    CHUNK_TARGET_TOKENS: int = 700
+    CHUNK_MAX_TOKENS: int = 950
+    CHUNK_OVERLAP_TOKENS: int = 100
+    TABLE_MAX_ROWS_PER_CHUNK: int = 20
     MAX_CHAT_HISTORY: int = 20
 
     # LlamaParse API key from https://cloud.llamaindex.ai
