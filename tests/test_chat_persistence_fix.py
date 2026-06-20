@@ -584,13 +584,9 @@ class TestMessageStore:
 
 
 class TestDockerComposeConfig:
-    """Validate docker-compose.yml has Redis service with persistent volume.
+    """Validate docker-compose.yml uses an external Redis server via REDIS_URL."""
 
-    **Validates: Requirements 1.3, 2.4**
-    """
-
-    def test_docker_compose_has_redis_service(self):
-        """docker-compose.yml must define a redis service."""
+    def _load_compose(self):
         import os
         import yaml
 
@@ -598,92 +594,39 @@ class TestDockerComposeConfig:
             os.path.dirname(__file__), "..", "docker-compose.yml"
         )
         with open(compose_path) as f:
-            config = yaml.safe_load(f)
+            return yaml.safe_load(f)
 
-        assert "redis" in config.get("services", {}), (
-            "Bug 1b: docker-compose.yml missing 'redis' service"
+    def test_docker_compose_does_not_start_local_redis_service(self):
+        """Redis must be provided by the server/cloud, not a local compose service."""
+        config = self._load_compose()
+
+        assert "redis" not in config.get("services", {}), (
+            "AI service should use server Redis from REDIS_URL, not a local Redis service"
         )
 
-    def test_docker_compose_redis_has_persistent_volume(self):
-        """Redis service must have a named volume for persistence."""
-        import os
-        import yaml
+    def test_docker_compose_ai_service_reads_env_file(self):
+        """ai-service must read REDIS_URL from .env/server environment."""
+        config = self._load_compose()
 
-        compose_path = os.path.join(
-            os.path.dirname(__file__), "..", "docker-compose.yml"
-        )
-        with open(compose_path) as f:
-            config = yaml.safe_load(f)
+        ai_service = config.get("services", {}).get("ai-service", {})
+        env_files = ai_service.get("env_file", [])
+        assert ".env" in env_files
 
-        redis_service = config.get("services", {}).get("redis", {})
-        volumes = redis_service.get("volumes", [])
-        assert len(volumes) > 0, "Redis service must have at least one volume"
-
-        # Check top-level volumes declaration
-        assert "volumes" in config, "docker-compose.yml must declare top-level volumes"
-        assert "redis_data" in config["volumes"], "redis_data volume must be declared"
-
-    def test_docker_compose_redis_has_appendonly(self):
-        """Redis service must use AOF persistence (--appendonly yes)."""
-        import os
-        import yaml
-
-        compose_path = os.path.join(
-            os.path.dirname(__file__), "..", "docker-compose.yml"
-        )
-        with open(compose_path) as f:
-            config = yaml.safe_load(f)
-
-        redis_service = config.get("services", {}).get("redis", {})
-        command = redis_service.get("command", "")
-        assert "appendonly yes" in command, (
-            "Redis service must use AOF persistence: 'redis-server --appendonly yes'"
-        )
-
-    def test_docker_compose_ai_service_uses_internal_redis_url(self):
-        """ai-service must connect to Redis via internal Docker network."""
-        import os
-        import yaml
-
-        compose_path = os.path.join(
-            os.path.dirname(__file__), "..", "docker-compose.yml"
-        )
-        with open(compose_path) as f:
-            config = yaml.safe_load(f)
+    def test_docker_compose_does_not_override_redis_url_to_local_service(self):
+        """compose must not force REDIS_URL=redis://redis:6379/0."""
+        config = self._load_compose()
 
         ai_service = config.get("services", {}).get("ai-service", {})
         env = ai_service.get("environment", [])
+        env_values = env.values() if isinstance(env, dict) else env
 
-        # env can be a list of "KEY=VALUE" strings or a dict
-        if isinstance(env, list):
-            redis_url_entries = [e for e in env if "REDIS_URL" in str(e)]
-            assert len(redis_url_entries) > 0, "ai-service must set REDIS_URL"
-            redis_url = redis_url_entries[0]
-            assert "host.docker.internal" not in str(redis_url), (
-                "REDIS_URL must use internal Docker network (redis://redis:...), "
-                "not host.docker.internal"
-            )
-            assert "redis://redis:" in str(redis_url), (
-                "REDIS_URL must point to the internal redis service"
-            )
-        elif isinstance(env, dict):
-            assert "REDIS_URL" in env
-            assert "host.docker.internal" not in env["REDIS_URL"]
-            assert "redis://redis:" in env["REDIS_URL"]
+        assert all("REDIS_URL=redis://redis:" not in str(entry) for entry in env_values)
+        assert all("REDIS_URL=redis://localhost:" not in str(entry) for entry in env_values)
 
-    def test_docker_compose_ai_service_depends_on_redis(self):
-        """ai-service must declare depends_on redis."""
-        import os
-        import yaml
-
-        compose_path = os.path.join(
-            os.path.dirname(__file__), "..", "docker-compose.yml"
-        )
-        with open(compose_path) as f:
-            config = yaml.safe_load(f)
+    def test_docker_compose_ai_service_does_not_depend_on_local_redis(self):
+        """ai-service should not depend_on redis when Redis is external."""
+        config = self._load_compose()
 
         ai_service = config.get("services", {}).get("ai-service", {})
         depends_on = ai_service.get("depends_on", [])
-        assert "redis" in depends_on, (
-            "ai-service must declare depends_on: [redis]"
-        )
+        assert "redis" not in depends_on
