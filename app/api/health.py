@@ -1,9 +1,9 @@
 from fastapi import APIRouter
 
-from app.embeddings.vector_store import database_health
+from app.embeddings import vector_store
 
 router = APIRouter()
 
 @router.get("/")
 def health_check():
-    return {"status": "ok", "database": database_health()}
+    return {"status": "ok", "database": vector_store.database_health()}

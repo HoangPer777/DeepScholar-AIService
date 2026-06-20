@@ -28,3 +28,9 @@ google-genai>=1.0.0
 # LlamaParse for AI-powered IEEE PDF extraction
 llama-parse>=0.5.0
 llama-index-core>=0.10.0
+
+# Redis client for short-term memory (Memory Chatbot)
+redis>=5.0.0
+
+# Token counting for context window management (Memory Chatbot)
+tiktoken>=0.7.0

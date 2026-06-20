@@ -1,0 +1,23 @@
+[
+  {
+    "id": "main_contribution",
+    "question": "What is the main contribution of the paper?",
+    "expected_section": "introduction"
+  },
+  {
+    "id": "methodology",
+    "question": "How does the proposed approach create chunks?",
+    "expected_section": "methodology"
+  },
+  {
+    "id": "table_results",
+    "question": "What Precision@5 does structure-aware chunking achieve?",
+    "expected_section": "results",
+    "expected_chunk_type": "table"
+  },
+  {
+    "id": "future_work",
+    "question": "What does the paper list as future work?",
+    "expected_section": "conclusion"
+  }
+]

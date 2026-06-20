@@ -1,0 +1,8 @@
+[
+  {
+    "article_id": 900001,
+    "title": "Structure-Aware RAG",
+    "abstract": "This paper proposes structure-aware chunking for scientific retrieval.",
+    "content_file": "llamaparse_sample_ieee.md"
+  }
+]

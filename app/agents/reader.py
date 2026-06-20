@@ -17,13 +17,20 @@ class ReaderAgent:
                 question=effective_question(state),
                 focus_sections=state.focus_sections,
                 limit=8,
+                timings=state.timings,
             )
             state.vector_context = [
                 {
                     "content":  c["content"],
                     "chunk_id": c["chunk_id"],
                     "distance": c["distance"],
-                    "section":  "unknown",
+                    "section": c.get("section") or "unknown",
+                    "section_title": c.get("section_title"),
+                    "chunk_type": c.get("chunk_type"),
+                    "heading_path": c.get("heading_path", []),
+                    "page_start": c.get("page_start"),
+                    "page_end": c.get("page_end"),
+                    "chunk_index": c.get("chunk_index"),
                 }
                 for c in chunks
             ]

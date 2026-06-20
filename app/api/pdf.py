@@ -11,8 +11,8 @@ from app.core.logger import get_logger
 from app.pdf_pipeline.llama_extractor import extract_sections_with_llamaparse, remove_references
 from app.pdf_pipeline.extractor import extract_text_from_pdf
 from app.pdf_pipeline.llm_extractor import extract_metadata_from_text
-from app.pdf_pipeline.chunker import chunk_text
-from app.embeddings.vector_store import ingest_article_chunks
+from app.pdf_pipeline.chunker import chunk_paper, chunk_text
+from app.embeddings.vector_store import ingest_article_chunks, ingest_paper_chunks
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -142,10 +142,23 @@ def process_pdf_pipeline(request: PDFUploadRequest):
 
         # ── Step 4: Chunk & Store Embeddings in PGVector ─────────────────────
         embed_text = f"{title}\n\n{abstract}\n\n{content}"
-        chunks = chunk_text(embed_text)
-        print(f"[Pipeline] Created {len(chunks)} text chunks for embedding.")
-
-        result = ingest_article_chunks(request.article_id, chunks)
+        try:
+            paper_chunks = chunk_paper(
+                title=title,
+                abstract=abstract,
+                content=content,
+                source_format="llamaparse_markdown" if extracted else "fallback_raw_text",
+            )
+            chunk_type_counts = {}
+            for chunk in paper_chunks:
+                chunk_type_counts[chunk.chunk_type] = chunk_type_counts.get(chunk.chunk_type, 0) + 1
+            print(f"[Pipeline] Created {len(paper_chunks)} structured chunks: {chunk_type_counts}")
+            result = ingest_paper_chunks(request.article_id, paper_chunks)
+        except Exception as chunk_error:
+            logger.error(f"[Pipeline] Structured chunking failed, falling back to legacy chunk_text: {chunk_error}")
+            chunks = chunk_text(embed_text)
+            print(f"[Pipeline] Created {len(chunks)} legacy text chunks for embedding.")
+            result = ingest_article_chunks(request.article_id, chunks)
         print(f"[Pipeline] Vector DB ingestion result: {result}")
 
         if not result.get("stored"):

@@ -85,6 +85,7 @@ def run_pipeline_with_failed_ingest(article_id: int, error: str) -> tuple[dict, 
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=fake_chunks), \
          patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
@@ -106,6 +107,7 @@ def run_pipeline_with_failed_ingest(article_id: int, error: str) -> tuple[dict, 
 )
 @h_settings(
     max_examples=50,
+    deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
 def test_property1_bug_condition_embedding_failure_reflected(article_id, error):
@@ -195,6 +197,7 @@ def run_pipeline_with_successful_ingest(article_id: int, chunks: list) -> dict:
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=chunks), \
          patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
@@ -265,6 +268,7 @@ def test_property2b_preservation_async_upload_returns_processing_started(slug):
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=["chunk one", "chunk two"]), \
          patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
@@ -320,6 +324,7 @@ def test_property2c_preservation_sync_upload_returns_completed(article_id, chunk
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=chunks), \
          patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()

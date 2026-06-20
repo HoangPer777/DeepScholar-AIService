@@ -84,7 +84,7 @@ def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
             alphaxiv_url = f"https://www.alphaxiv.org/abs/{arxiv_id}"
 
             # Extract abstract — KHÔNG cắt dưới 1500 chars
-            summary = (entry.summary or "").strip()
+            summary = entry.summary or ""
             content = summary[:2000] if summary else ""
 
             # Extract authors

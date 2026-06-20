@@ -45,7 +45,7 @@ for _mod_name, _stub in _STUB_MODULES.items():
     sys.modules.setdefault(_mod_name, _stub)
 
 _FAKE_DB_URL = (
-    "postgresql://user:pass@aws-1-ap-southeast-1.pooler.supabase.com"
+    "postgresql://user:pass@db.example.test"
     ":5432/postgres?sslmode=require"
 )
 
@@ -341,6 +341,13 @@ class TestProperty5EmbeddingStorageRoundTrip(unittest.TestCase):
                 self.article_id = kw["article_id"]
                 self.chunk_index = kw["chunk_index"]
                 self.content = kw["content"]
+                self.section = kw.get("section", "unknown")
+                self.section_title = kw.get("section_title", "Unknown")
+                self.chunk_type = kw.get("chunk_type", "section_text")
+                self.heading_path = kw.get("heading_path", "")
+                self.page_start = kw.get("page_start")
+                self.page_end = kw.get("page_end")
+                self.metadata_json = kw.get("metadata_json", {})
 
         class FakeEmbedding:
             def __init__(self, **kw):
@@ -379,7 +386,7 @@ class TestProperty5EmbeddingStorageRoundTrip(unittest.TestCase):
         mock_session.delete = MagicMock()
         mock_session.query = fake_query_fn
 
-        dummy_embeddings = [[0.1] * 3 for _ in chunks]
+        dummy_embeddings = [[0.1] * vs.settings.EMBEDDING_DIMENSION for _ in chunks]
 
         with patch.object(vs, "SessionLocal", return_value=mock_session), \
              patch("app.embeddings.vector_store.embed_texts", return_value=dummy_embeddings), \
@@ -397,7 +404,7 @@ class TestProperty5EmbeddingStorageRoundTrip(unittest.TestCase):
             self.assertEqual(result.get("chunk_count"), len(chunks))
 
             # Run similarity search
-            dummy_query_embedding = [0.1] * 3
+            dummy_query_embedding = [0.1] * vs.settings.EMBEDDING_DIMENSION
             search_results = vs.similarity_search(
                 article_id, dummy_query_embedding, limit=len(chunks)
             )
