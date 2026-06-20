@@ -31,4 +31,8 @@ MODEL_CANDIDATES: dict[str, list[str]] = {
         "openai/gpt-oss-120b:free",
         "openai/gpt-oss-20b:free",
     ],
+    "fast_chat": [
+        "openai/gpt-oss-20b:free",
+        "openai/gpt-oss-120b:free",
+    ],
 }

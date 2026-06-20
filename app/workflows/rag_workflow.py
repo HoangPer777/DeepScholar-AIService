@@ -235,12 +235,24 @@ def run_chat_workflow(
     if session_id:
         redis_client = create_redis_client()
         try:
-            t0 = time.perf_counter()
+            context = None
             store = MemoryStore(redis_client)
-            context = store.get_context_window(session_id)
-            timings["context_lookup_ms"] = _elapsed_ms(t0)
+            try:
+                t0 = time.perf_counter()
+                context = store.get_context_window(session_id)
+                timings["context_lookup_ms"] = _elapsed_ms(t0)
+            except SessionContextNotFoundError:
+                # No context in Redis -> fall through to full pipeline.
+                pass
+            except Exception as exc:  # pragma: no cover
+                logger.warning(
+                    "run_chat_workflow: context lookup failed for session %s: %s — "
+                    "falling through to full pipeline",
+                    session_id,
+                    exc,
+                )
 
-            if context.research_report is not None:
+            if context is not None and context.research_report is not None:
                 # ── Fast Chat Mode ────────────────────────────────────────────
                 logger.info(
                     "run_chat_workflow: session=%s mode=fast_chat", session_id
@@ -265,17 +277,6 @@ def run_chat_workflow(
                 return result
 
             # context exists but no research_report → fall through to full pipeline
-
-        except SessionContextNotFoundError:
-            # No context in Redis → fall through to full pipeline
-            pass
-        except Exception as exc:  # pragma: no cover
-            logger.warning(
-                "run_chat_workflow: error checking Research_Context for session %s: %s — "
-                "falling through to full pipeline",
-                session_id,
-                exc,
-            )
         finally:
             try:
                 redis_client.close()
