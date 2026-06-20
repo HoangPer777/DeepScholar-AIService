@@ -106,7 +106,11 @@ def _save_research_context(session_id: str, result: dict) -> None:
         store = MemoryStore(redis_client)
 
         # Build ResearchReport from pipeline result
-        reviewed_answer: str = result.get("reviewed_answer") or ""
+        # A rejected draft is still useful conversation context, but it must not
+        # be promoted to reviewed_answer. Preserve it with its review metadata.
+        report_answer: str = (
+            result.get("reviewed_answer") or result.get("draft_answer") or ""
+        )
         confidence_score: float = float(result.get("confidence_score", 0.0))
         review_feedback: str = result.get("review_feedback") or ""
 
@@ -131,7 +135,7 @@ def _save_research_context(session_id: str, result: dict) -> None:
                 )
 
         research_report = ResearchReport(
-            answer=reviewed_answer,
+            answer=report_answer,
             sources=sources,
             confidence_score=confidence_score,
             review_feedback=review_feedback,
@@ -348,7 +352,7 @@ def run_chat_workflow(
     result = state.model_dump()
 
     # ── Task 7.2: save Research_Context after pipeline ───────────────────────
-    if session_id and result.get("reviewed_answer"):
+    if session_id and (result.get("reviewed_answer") or result.get("draft_answer")):
         p0 = time.perf_counter()
         _save_research_context(session_id, result)
         state.timings["context_save_ms"] = _elapsed_ms(p0)

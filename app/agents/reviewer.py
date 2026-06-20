@@ -25,6 +25,10 @@ _ACADEMIC_SOURCE_TYPES = {"arxiv", "semantic_scholar", "alphaxiv", "openalex", "
 _LOW_ACADEMIC_SCORE_CAP = 0.60
 
 
+class ReviewRejectedError(RuntimeError):
+    """Raised when the draft does not pass the configured review policy."""
+
+
 def _source_quality_gate(
     sources: List[Dict],
     need_external_search: bool,
@@ -134,9 +138,6 @@ class ReviewerAgent:
             state.review_feedback = "No external sources found. Cannot evaluate grounding quality."
             state.iteration_count += 1
             log(state, f"\n[ReviewerAgent] Iteration {state.iteration_count} — REWRITE (no sources)")
-            if state.iteration_count >= state.max_iterations:
-                state.reviewed_answer = state.draft_answer
-                log(state, "  -> MAX ITERATIONS reached — using best draft")
             return state
 
         # V13: Include source list in LLM input for quality-aware evaluation
@@ -152,16 +153,10 @@ class ReviewerAgent:
                 )),
             ])
         except AllLLMProvidersFailed as exc:
-            state.confidence_score = min(0.69, max(0.50, academic_ratio))
-            state.review_feedback = (
-                "Automated reviewer was unavailable; returned the best writer draft "
-                "after deterministic source-quality validation."
-            )
-            state.iteration_count += 1
-            state.reviewed_answer = state.draft_answer
             log(state, f"  [WARN] {exc}")
-            log(state, "  -> REVIEWER DEGRADED: using best draft")
-            return state
+            raise ReviewRejectedError(
+                "Automated reviewer unavailable; no unreviewed draft was returned."
+            ) from exc
 
         raw = res.content.strip()
         data = safe_json(raw)
@@ -216,7 +211,6 @@ class ReviewerAgent:
         else:
             log(state, f"  -> REWRITE ({state.iteration_count}/{state.max_iterations})")
             if state.iteration_count >= state.max_iterations:
-                state.reviewed_answer = state.draft_answer
-                log(state, "  -> MAX ITERATIONS reached — using best draft")
+                log(state, "  -> REJECTED — draft remains unreviewed")
 
         return state
