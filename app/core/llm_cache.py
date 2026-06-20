@@ -2,9 +2,9 @@ import hashlib
 import json
 import logging
 import re
-import redis as redis_lib
 from typing import Optional
 from app.core.config import settings
+from app.core.redis_client import create_redis_client, mask_redis_url
 
 logger = logging.getLogger(__name__)
 PLANNER_CACHE_TTL = 600  # 10 minutes (Requirement 5.3)
@@ -44,8 +44,12 @@ class PlannerLLMCache:
         self._hit_count = 0
         self._miss_count = 0
         try:
-            self._redis = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+            self._redis = create_redis_client(decode_responses=True)
             self._redis.ping()
+            logger.info(
+                "PlannerLLMCache connected to Redis at %s",
+                mask_redis_url(settings.REDIS_URL),
+            )
         except Exception as exc:
             logger.warning("PlannerLLMCache: Redis unavailable (%s), cache disabled", exc)
             self._enabled = False

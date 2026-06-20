@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # REDIS (Short-Term Memory — Memory Chatbot)
     # ============================================================
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: float = 2.0
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 2.0
+    REDIS_HEALTH_CHECK_INTERVAL_SECONDS: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

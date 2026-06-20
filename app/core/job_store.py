@@ -2,9 +2,8 @@ import json
 import logging
 from typing import Optional
 
-import redis as redis_lib
-
 from app.core.config import settings
+from app.core.redis_client import create_redis_client, mask_redis_url
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +26,12 @@ class RedisJobStore:
         self._fallback: dict[str, dict] = {}
         self._use_redis = True
         try:
-            self._redis = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+            self._redis = create_redis_client(decode_responses=True)
             self._redis.ping()
+            logger.info(
+                "RedisJobStore connected to Redis at %s",
+                mask_redis_url(settings.REDIS_URL),
+            )
         except Exception as exc:
             logger.warning(
                 "RedisJobStore: Redis unavailable (%s), using in-memory fallback", exc
