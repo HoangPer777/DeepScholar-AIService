@@ -13,24 +13,22 @@ Models are ordered by capability (strongest first):
 MODEL_CANDIDATES: dict[str, list[str]] = {
     "planner": [
         "openai/gpt-oss-120b:free",
-        "z-ai/glm-4.5-air:free",
         "openai/gpt-oss-20b:free",
     ],
     "clarifier": [
         "openai/gpt-oss-20b:free",
-        "z-ai/glm-4.5-air:free",
+        "openai/gpt-oss-120b:free",
     ],
     "researcher": [
         "openai/gpt-oss-120b:free",
-        "z-ai/glm-4.5-air:free",
         "openai/gpt-oss-20b:free",
     ],
     "writer": [
         "openai/gpt-oss-120b:free",
-        "z-ai/glm-4.5-air:free",
+        "openai/gpt-oss-20b:free",
     ],
     "reviewer": [
-        "z-ai/glm-4.5-air:free",
+        "openai/gpt-oss-120b:free",
         "openai/gpt-oss-20b:free",
     ],
 }

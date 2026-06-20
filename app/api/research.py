@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import logging
 import uuid
 from fastapi import APIRouter, HTTPException
 
@@ -8,6 +9,7 @@ from app.schemas.request import ResearchRequest
 from app.workflows.rag_workflow import run_chat_workflow
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Dedicated thread pool for long-running research jobs
 # Prevents default ThreadPoolExecutor saturation from blocking the event loop
@@ -103,6 +105,7 @@ async def _run_job(task_id: str, question: str, debug: bool = False):
             {"status": "done", "result": _build_response(result, task_id, include_timings=debug)},
         )
     except Exception as e:
+        logger.exception("Deep research job %s failed", task_id)
         _job_store.update_job(task_id, {"status": "error", "error": str(e)})
 
 

@@ -14,6 +14,10 @@ from langchain_openai import ChatOpenAI
 from app.core.config import settings
 
 
+class AllLLMProvidersFailed(RuntimeError):
+    """Raised when every OpenRouter candidate and the Groq fallback fail."""
+
+
 class SafeLLM:
     """
     Multi-model LLM router với auto-fallback.
@@ -54,7 +58,7 @@ class SafeLLM:
         """
         # Nếu không có OPENROUTER_API_KEY → dùng Groq ngay
         if not settings.OPENROUTER_API_KEY:
-            return self.groq_fallback.invoke(messages)
+            return self._invoke_groq_fallback(messages)
 
         # Thử từng candidate
         for model_name in self.candidates:
@@ -72,7 +76,19 @@ class SafeLLM:
 
         # Emergency fallback — tất cả candidates đã fail
         print(f"\n[SafeLLM:{self.agent_name}] All candidates failed, using Groq emergency fallback")
-        return self.groq_fallback.invoke(messages)
+        return self._invoke_groq_fallback(messages)
+
+    def _invoke_groq_fallback(self, messages: List) -> AIMessage:
+        try:
+            response = self.groq_fallback.invoke(messages)
+            print(f"[SafeLLM:{self.agent_name}] SUCCESS: Groq emergency fallback")
+            return response
+        except Exception as exc:
+            print(f"[SafeLLM:{self.agent_name}] FAILED: Groq emergency fallback")
+            print(f"  Error: {str(exc)[:200]}")
+            raise AllLLMProvidersFailed(
+                f"All LLM providers failed for agent '{self.agent_name}'"
+            ) from exc
 
     def _build_openrouter_llm(self, model: str) -> ChatOpenAI:
         """
