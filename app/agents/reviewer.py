@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.safe_llm import AllLLMProvidersFailed
 from app.core.utils import effective_question, log, safe_json
 from app.prompts.reviewer_prompt import REVIEWER_PROMPT
 from app.tools.source_filter import LOW_QUALITY_DOMAINS
@@ -141,14 +142,26 @@ class ReviewerAgent:
         # V13: Include source list in LLM input for quality-aware evaluation
         source_summary = _build_source_summary(state.external_context)
 
-        res = self.llm.invoke([
-            SystemMessage(content=REVIEWER_PROMPT),
-            HumanMessage(content=(
-                f"Research Question: {effective_question(state)}\n\n"
-                f"=== Sources Used ===\n{source_summary}\n\n"
-                f"=== Draft ===\n{state.draft_answer}"
-            )),
-        ])
+        try:
+            res = self.llm.invoke([
+                SystemMessage(content=REVIEWER_PROMPT),
+                HumanMessage(content=(
+                    f"Research Question: {effective_question(state)}\n\n"
+                    f"=== Sources Used ===\n{source_summary}\n\n"
+                    f"=== Draft ===\n{state.draft_answer}"
+                )),
+            ])
+        except AllLLMProvidersFailed as exc:
+            state.confidence_score = min(0.69, max(0.50, academic_ratio))
+            state.review_feedback = (
+                "Automated reviewer was unavailable; returned the best writer draft "
+                "after deterministic source-quality validation."
+            )
+            state.iteration_count += 1
+            state.reviewed_answer = state.draft_answer
+            log(state, f"  [WARN] {exc}")
+            log(state, "  -> REVIEWER DEGRADED: using best draft")
+            return state
 
         raw = res.content.strip()
         data = safe_json(raw)
