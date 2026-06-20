@@ -533,6 +533,25 @@ class TestResearchAPIContract:
         assert debug["timings"]["planner_ms"] == 10
         assert debug["timings"]["total_latency_ms"] == 25
 
+    def test_rejected_draft_is_returned_as_quality_outcome(self):
+        from app.api.research import _build_response
+
+        response = _build_response(
+            {
+                "reviewed_answer": None,
+                "draft_answer": "Unreviewed research draft.",
+                "external_context": [],
+                "confidence_score": 0.45,
+                "iteration_count": 1,
+                "review_feedback": "Add citations.",
+            },
+            "task-1",
+        )
+
+        assert response["answer"] == "Unreviewed research draft."
+        assert response["decision"] == "rejected"
+        assert response["session_id"] == "task-1"
+
     def test_research_request_accepts_message_alias(self):
         from app.schemas.request import ResearchRequest
 

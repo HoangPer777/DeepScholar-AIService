@@ -85,7 +85,7 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
         },
         "confidence_score":  result.get("confidence_score", 0.0),
         "iterations_used":   result.get("iteration_count", 0),
-        "decision": "accept" if result.get("reviewed_answer") else "rewrite (max iterations reached)",
+        "decision": "accept" if result.get("reviewed_answer") else "rejected",
         "review_feedback":   result.get("review_feedback"),
     }
     if include_timings:
