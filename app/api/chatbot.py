@@ -18,11 +18,11 @@ import uuid
 import redis as redis_lib
 from fastapi import APIRouter, HTTPException
 
-from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.job_store import get_job_store
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.core.message_store import MessageStore
+from app.core.redis_client import create_redis_client
 from app.schemas.chat_models import Message, MessageRole
 from app.schemas.request import ChatRequest
 from app.schemas.response import ChatResponse
@@ -77,7 +77,7 @@ def _build_chat_response(result: dict, session_id: str, article_id, include_timi
 
 
 def _has_research_context(session_id: str) -> bool:
-    redis_client = redis_lib.from_url(settings.REDIS_URL)
+    redis_client = create_redis_client(from_url=redis_lib.from_url)
     try:
         store = MemoryStore(redis_client)
         context = store.get_context_window(session_id)
@@ -254,7 +254,7 @@ async def chat_history(session_id: str):
     Strategy: try Redis first (fast, TTL 24h) → fallback to PostgreSQL (permanent).
     """
     # --- Try Redis first ---
-    redis_client = redis_lib.from_url(settings.REDIS_URL)
+    redis_client = create_redis_client(from_url=redis_lib.from_url)
     try:
         store = MemoryStore(redis_client)
         context = store.get_context_window(session_id)
@@ -395,7 +395,7 @@ def _persist_to_postgres(
 
 def _persist_to_redis(session_id: str, question: str, answer: str) -> None:
     """Save user message + assistant response to Redis MemoryStore. Fire-and-forget."""
-    redis_client = redis_lib.from_url(settings.REDIS_URL)
+    redis_client = create_redis_client(from_url=redis_lib.from_url)
     try:
         store = MemoryStore(redis_client)
 

@@ -18,8 +18,6 @@ import logging
 import time
 from typing import Optional
 
-import redis as redis_lib
-
 from app.agents.clarifier import ClarifierAgent
 from app.agents.fast_chat import FastChatAgent
 from app.agents.planner import PlannerAgent
@@ -27,9 +25,9 @@ from app.agents.reader import ReaderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.writer import WriterAgent
-from app.core.config import settings
 from app.core.llm import get_safe_llm
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
+from app.core.redis_client import create_redis_client
 from app.schemas.chat_models import Message, MessageRole, ResearchReport, Source
 from app.workflows.states import AgentState
 
@@ -104,7 +102,7 @@ def _save_research_context(session_id: str, result: dict) -> None:
     """
     redis_client = None
     try:
-        redis_client = redis_lib.from_url(settings.REDIS_URL)
+        redis_client = create_redis_client()
         store = MemoryStore(redis_client)
 
         # Build ResearchReport from pipeline result
@@ -231,7 +229,7 @@ def run_chat_workflow(
 
     # ── Task 7.1: Research_Context routing ───────────────────────────────────
     if session_id:
-        redis_client = redis_lib.from_url(settings.REDIS_URL)
+        redis_client = create_redis_client()
         try:
             t0 = time.perf_counter()
             store = MemoryStore(redis_client)
