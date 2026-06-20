@@ -141,8 +141,46 @@ def test_rejected_draft_routes_second_question_to_fast_chat():
     fast_llm.invoke.assert_called_once()
 
 
+def test_fast_chat_llm_failure_does_not_fall_through_to_full_pipeline():
+    from app.core.safe_llm import AllLLMProvidersFailed
+    from app.workflows.rag_workflow import (
+        _save_research_context,
+        run_chat_workflow,
+    )
+
+    server = fakeredis.FakeServer()
+
+    def make_redis_client():
+        return fakeredis.FakeRedis(server=server)
+
+    failed_fast_llm = MagicMock()
+    failed_fast_llm.invoke.side_effect = AllLLMProvidersFailed("fast chat unavailable")
+    initial_result = {
+        "reviewed_answer": "Accepted research report.",
+        "draft_answer": None,
+        "confidence_score": 0.9,
+        "review_feedback": "Accepted.",
+        "external_context": [],
+    }
+
+    with (
+        patch("app.workflows.rag_workflow.create_redis_client", side_effect=make_redis_client),
+        patch("app.workflows.rag_workflow.get_safe_llm", return_value=failed_fast_llm) as get_llm,
+    ):
+        _save_research_context("session-1", initial_result)
+        with pytest.raises(AllLLMProvidersFailed, match="fast chat unavailable"):
+            run_chat_workflow(
+                question="Explain it briefly.",
+                session_id="session-1",
+            )
+
+    get_llm.assert_called_once_with("fast_chat")
+    failed_fast_llm.invoke.assert_called_once()
+
+
 def test_removed_unavailable_glm_free_slug():
     from app.core.model_candidates import MODEL_CANDIDATES
 
     candidates = [model for models in MODEL_CANDIDATES.values() for model in models]
     assert "z-ai/glm-4.5-air:free" not in candidates
+    assert MODEL_CANDIDATES["fast_chat"][0] == "openai/gpt-oss-20b:free"
