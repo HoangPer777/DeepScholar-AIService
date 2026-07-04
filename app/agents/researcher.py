@@ -21,6 +21,7 @@ from typing import List
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.safe_llm import AllLLMProvidersFailed
 from app.core.utils import effective_question, log
 from app.prompts.researcher_prompt import RESEARCHER_PROMPT
 from app.tools.academic_search import academic_search
@@ -167,15 +168,26 @@ class ResearcherAgent:
         )
 
         t0 = time.perf_counter()
-        res = self.llm.invoke([
-            SystemMessage(content=RESEARCHER_PROMPT),
-            HumanMessage(content=f"Research question: {effective_question(state)}\n\nSources:\n{numbered}"),
-        ])
+        try:
+            res = self.llm.invoke([
+                SystemMessage(content=RESEARCHER_PROMPT),
+                HumanMessage(content=f"Research question: {effective_question(state)}\n\nSources:\n{numbered}"),
+            ])
+            notes = res.content
+        except AllLLMProvidersFailed as exc:
+            log(state, f"[ResearcherAgent] LLM unavailable, using source-based notes: {exc}")
+            notes = "\n\n".join(
+                f"[{i + 1}] {r.get('title', 'Untitled')}\n"
+                f"Type: {r.get('source_type', 'web')}\n"
+                f"URL: {r.get('url', '')}\n"
+                f"Summary: {r.get('content', '')[:900]}"
+                for i, r in enumerate(all_results)
+            )
         state.timings["researcher_llm_ms"] = int((time.perf_counter() - t0) * 1000)
 
         state.external_context.insert(0, {
             "title":       "__research_notes__",
-            "content":     res.content,
+            "content":     notes,
             "url":         "",
             "score":       1.0,
             "source_type": "internal",

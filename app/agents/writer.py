@@ -1,5 +1,6 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.safe_llm import AllLLMProvidersFailed
 from app.core.utils import effective_question, log
 from app.prompts.writer_prompt import WRITER_PROMPT
 from app.tools.citation import format_apa_reference
@@ -60,7 +61,19 @@ Focus Sections: {', '.join(state.focus_sections) or 'All'}
 """
 
         prompt = WRITER_PROMPT.replace("{QUESTION}", question)
-        res = self.llm.invoke([SystemMessage(content=prompt), HumanMessage(content=context)])
-        state.draft_answer = res.content
-        log(state, f"\n[WriterAgent] Draft written — iteration {state.iteration_count + 1} ({len(res.content)} chars)")
+        try:
+            res = self.llm.invoke([SystemMessage(content=prompt), HumanMessage(content=context)])
+            state.draft_answer = res.content
+        except AllLLMProvidersFailed as exc:
+            log(state, f"[WriterAgent] LLM unavailable, using source-based fallback: {exc}")
+            references = apa_ref_block or source_index or "No sources available."
+            state.draft_answer = (
+                f"# Source-based research summary\n\n"
+                f"OpenRouter free models are currently unavailable or rate-limited, "
+                f"so this fallback answer is generated directly from collected sources.\n\n"
+                f"## Question\n{question}\n\n"
+                f"## Key notes\n{notes}\n\n"
+                f"## References\n{references}"
+            )
+        log(state, f"\n[WriterAgent] Draft written — iteration {state.iteration_count + 1} ({len(state.draft_answer)} chars)")
         return state

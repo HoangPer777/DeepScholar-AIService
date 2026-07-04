@@ -153,10 +153,12 @@ class ReviewerAgent:
                 )),
             ])
         except AllLLMProvidersFailed as exc:
-            log(state, f"  [WARN] {exc}")
-            raise ReviewRejectedError(
-                "Automated reviewer unavailable; no unreviewed draft was returned."
-            ) from exc
+            log(state, f"  [WARN] Reviewer unavailable, returning draft without automated review: {exc}")
+            state.reviewed_answer = state.draft_answer
+            state.confidence_score = 0.5
+            state.review_feedback = "Automated reviewer unavailable; draft returned without review."
+            state.iteration_count += 1
+            return state
 
         raw = res.content.strip()
         data = safe_json(raw)

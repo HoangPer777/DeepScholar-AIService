@@ -106,7 +106,15 @@ async def _run_job(task_id: str, question: str, debug: bool = False):
         )
     except Exception as e:
         logger.exception("Deep research job %s failed", task_id)
-        _job_store.update_job(task_id, {"status": "error", "error": str(e)})
+        _job_store.update_job(
+            task_id,
+            {
+                "status": "error",
+                "error_code": "deep_research_failed",
+                "error": str(e),
+                "retryable": "429" in str(e) or "rate" in str(e).lower() or "timeout" in str(e).lower(),
+            },
+        )
 
 
 @router.post("/deep-research")
@@ -127,8 +135,12 @@ async def research_status(task_id: str):
     job = _job_store.get_job(task_id)
     if not job:
         raise HTTPException(status_code=404, detail="Task not found")
-    if job["status"] == "error":
-        raise HTTPException(status_code=500, detail=job["error"])
+    if job["status"] == "error":        return {
+            "status": "error",
+            "error_code": job.get("error_code", "deep_research_failed"),
+            "message": job.get("error", "Deep research failed."),
+            "retryable": job.get("retryable", True),
+        }
     if job["status"] == "done":
         # Clean up after delivering result
         result = job["result"]
