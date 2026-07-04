@@ -67,15 +67,16 @@ def get_safe_llm(agent_name: str) -> BaseChatModel:
         # Nếu agent_name không có trong MODEL_CANDIDATES → fallback về get_agent_llm()
         return get_agent_llm()
 
-    # Tạo Groq fallback
-    groq_fallback = ChatGroq(
-        model=settings.GROQ_LLM_MODEL,
-        api_key=settings.GROQ_API_KEY,
-        temperature=0,
-        max_retries=3,
-    )
+    groq_fallback = None
+    if settings.ENABLE_GROQ_FALLBACK:
+        groq_fallback = ChatGroq(
+            model=settings.GROQ_LLM_MODEL,
+            api_key=settings.GROQ_API_KEY,
+            temperature=0,
+            max_retries=3,
+        )
 
-    # Trả về SafeLLM với candidates và Groq fallback
+    # Trả về SafeLLM với candidates và optional Groq fallback
     return SafeLLM(
         agent_name=agent_name,
         candidates=candidates,

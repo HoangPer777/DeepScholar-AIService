@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # ============================================================
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_MODEL_TIMEOUT_SECONDS: float = 180.0
+    ENABLE_GROQ_FALLBACK: bool = False
+    OPENROUTER_PLANNER_MODELS: str = ""
+    OPENROUTER_CLARIFIER_MODELS: str = ""
+    OPENROUTER_RESEARCHER_MODELS: str = ""
+    OPENROUTER_WRITER_MODELS: str = ""
+    OPENROUTER_REVIEWER_MODELS: str = ""
+    OPENROUTER_FAST_CHAT_MODELS: str = ""
 
     # ============================================================
     # REDIS (Short-Term Memory — Memory Chatbot)

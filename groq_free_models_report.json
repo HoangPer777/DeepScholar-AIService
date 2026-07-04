@@ -1,0 +1,127 @@
+{
+  "checked_at_unix": 1783187032,
+  "total_tested": 12,
+  "usable_count": 9,
+  "results": [
+    {
+      "model_id": "qwen/qwen3.6-27b",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.333,
+      "output_sample": "<think>\nHere's a thinking process:\n\n1",
+      "context_window": 131072,
+      "owned_by": "Alibaba Cloud"
+    },
+    {
+      "model_id": "llama-3.3-70b-versatile",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.391,
+      "output_sample": "ok",
+      "context_window": 131072,
+      "owned_by": "Meta"
+    },
+    {
+      "model_id": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.402,
+      "output_sample": "ok",
+      "context_window": 131072,
+      "owned_by": "Meta"
+    },
+    {
+      "model_id": "llama-3.1-8b-instant",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.447,
+      "output_sample": "ok",
+      "context_window": 131072,
+      "owned_by": "Meta"
+    },
+    {
+      "model_id": "allam-2-7b",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.526,
+      "output_sample": "Ok. إذا كنت بحاجة إلى مساعدة",
+      "context_window": 4096,
+      "owned_by": "SDAIA"
+    },
+    {
+      "model_id": "openai/gpt-oss-20b",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.625,
+      "output_sample": "",
+      "context_window": 131072,
+      "owned_by": "OpenAI"
+    },
+    {
+      "model_id": "openai/gpt-oss-120b",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.633,
+      "output_sample": "",
+      "context_window": 131072,
+      "owned_by": "OpenAI"
+    },
+    {
+      "model_id": "qwen/qwen3-32b",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.82,
+      "output_sample": "<think>\nOkay, the user wants me",
+      "context_window": 131072,
+      "owned_by": "Alibaba Cloud"
+    },
+    {
+      "model_id": "groq/compound",
+      "ok": true,
+      "status_code": 200,
+      "error_type": null,
+      "latency_seconds": 0.957,
+      "output_sample": "ok",
+      "context_window": 131072,
+      "owned_by": "Groq"
+    },
+    {
+      "model_id": "canopylabs/orpheus-v1-english",
+      "ok": false,
+      "status_code": 400,
+      "error_type": "unknown",
+      "latency_seconds": 0.279,
+      "output_sample": "{\"error\":{\"message\":\"The model `canopylabs/orpheus-v1-english` requires terms acceptance. Please have the org admin accept the terms at https://console.groq.com",
+      "context_window": 4000,
+      "owned_by": "Canopy Labs"
+    },
+    {
+      "model_id": "groq/compound-mini",
+      "ok": false,
+      "status_code": 429,
+      "error_type": "rate_limited",
+      "latency_seconds": 0.357,
+      "output_sample": "{\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kvk2q2ysem79th982bk6s177` service tier `on_demand` on tokens per ",
+      "context_window": 131072,
+      "owned_by": "Groq"
+    },
+    {
+      "model_id": "canopylabs/orpheus-arabic-saudi",
+      "ok": false,
+      "status_code": 400,
+      "error_type": "unknown",
+      "latency_seconds": 0.379,
+      "output_sample": "{\"error\":{\"message\":\"The model `canopylabs/orpheus-arabic-saudi` requires terms acceptance. Please have the org admin accept the terms at https://console.groq.c",
+      "context_window": 4000,
+      "owned_by": "Canopy Labs"
+    }
+  ]
+}

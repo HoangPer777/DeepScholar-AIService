@@ -67,4 +67,5 @@ jobs:
               -e AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" \
               -e AWS_S3_REGION_NAME="${{ secrets.AWS_S3_REGION_NAME }}" \
               -e OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
+              -e ENABLE_GROQ_FALLBACK="${{ secrets.ENABLE_GROQ_FALLBACK }}" \
               ${{ secrets.DOCKER_USERNAME }}/deepscholar-ai:latest
