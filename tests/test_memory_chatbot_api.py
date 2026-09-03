@@ -471,7 +471,14 @@ class TestResearchAPIContract:
         status_resp = client.get(f"/api/research/status/{task_id}")
         # Should be pending (job hasn't run yet in test)
         assert status_resp.status_code == 200
-        assert status_resp.json()["status"] == "pending"
+        status_data = status_resp.json()
+        assert status_data["status"] == "pending"
+        assert status_data["progress"]["phase"] in {
+            "queued", "planning", "clarifying", "searching", "synthesizing",
+            "drafting", "reviewing", "rewriting", "finalizing",
+        }
+        assert isinstance(status_data["activities"], list)
+        assert isinstance(status_data["source_previews"], list)
 
     def test_research_result_has_sources_list(self):
         """When job completes, result should have sources list."""

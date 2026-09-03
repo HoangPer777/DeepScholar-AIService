@@ -17,7 +17,8 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import Callable, List, Optional
+from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -34,6 +35,33 @@ MAX_QUERIES = 5  # Requirement 1.4: cap at 5 queries
 
 _ACADEMIC_SOURCE_TYPES = {"arxiv", "semantic_scholar", "alphaxiv", "openalex", "crossref"}
 _MIN_ACADEMIC_SOURCES = 3  # trigger re-search if below this
+
+
+def _emit_progress(callback: Optional[Callable[[dict], None]], event: dict) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        logger.warning("Researcher progress callback failed", exc_info=True)
+
+
+def _source_previews(results: List[dict]) -> List[dict]:
+    previews: List[dict] = []
+    for source in results:
+        url = str(source.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        previews.append(
+            {
+                "title": source.get("title") or urlparse(url).netloc,
+                "url": url,
+                "domain": urlparse(url).netloc,
+                "source_type": source.get("source_type", "web"),
+                "year": source.get("year") or source.get("apa_year"),
+            }
+        )
+    return previews
 
 
 def _deduplicate_queries(queries: List[str]) -> List[str]:
@@ -61,7 +89,10 @@ def _collect_sources(queries: List[str]) -> List[dict]:
     return all_results
 
 
-def _collect_sources_parallel(queries: List[str]) -> List[dict]:
+def _collect_sources_parallel(
+    queries: List[str],
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> List[dict]:
     """
     Run academic_search for each query in parallel using ThreadPoolExecutor.
     Deduplicates results by URL. Caps at MAX_QUERIES queries.
@@ -87,8 +118,10 @@ def _collect_sources_parallel(queries: List[str]) -> List[dict]:
 
     with ThreadPoolExecutor(max_workers=min(len(capped), MAX_QUERIES)) as executor:
         futures = {executor.submit(fetch_one, q): q for q in capped}
+        completed_queries = 0
         for future in as_completed(futures):
             query = futures[future]
+            completed_queries += 1
             try:
                 results = future.result()
                 with lock:
@@ -99,9 +132,47 @@ def _collect_sources_parallel(queries: List[str]) -> List[dict]:
                             all_results.append(r)
                         elif not url:
                             all_results.append(r)
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "phase": "searching",
+                        "state": "completed",
+                        "title": f"Đã tìm kiếm: {query[:120]}",
+                        "detail": (
+                            f"Hoàn thành {completed_queries}/{len(capped)} truy vấn; "
+                            f"nhận được {len(results)} kết quả trước khi khử trùng lặp."
+                        ),
+                        "message": f"Đã hoàn thành {completed_queries}/{len(capped)} truy vấn tìm kiếm",
+                        "metadata": {
+                            "query": query,
+                            "completed_queries": completed_queries,
+                            "total_queries": len(capped),
+                            "found_sources": len(results),
+                        },
+                        "source_previews": _source_previews(results),
+                    },
+                )
             except Exception as exc:
                 logger.warning(
                     "academic_search failed for query '%s': %s", query, exc
+                )
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "phase": "searching",
+                        "state": "failed",
+                        "title": "Một truy vấn tìm kiếm chưa thành công",
+                        "detail": (
+                            f"Không thể hoàn thành truy vấn '{query[:160]}'; "
+                            "pipeline vẫn tiếp tục với các truy vấn còn lại."
+                        ),
+                        "message": f"Đã xử lý {completed_queries}/{len(capped)} truy vấn tìm kiếm",
+                        "metadata": {
+                            "query": query,
+                            "completed_queries": completed_queries,
+                            "total_queries": len(capped),
+                        },
+                    },
                 )
     return all_results
 
@@ -110,9 +181,22 @@ class ResearcherAgent:
     def __init__(self, llm):
         self.llm = llm
 
-    def run(self, state: AgentState) -> AgentState:
+    def run(
+        self,
+        state: AgentState,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+    ) -> AgentState:
         if not state.need_external_search:
             log(state, "\n[ResearcherAgent] SKIPPED")
+            _emit_progress(
+                progress_callback,
+                {
+                    "phase": "synthesizing",
+                    "state": "skipped",
+                    "title": "Không cần tổng hợp nguồn bên ngoài",
+                    "detail": "Pipeline tiếp tục với ngữ cảnh hiện có.",
+                },
+            )
             return state
 
         # Deduplicate queries
@@ -127,7 +211,7 @@ class ResearcherAgent:
 
         # Initial fetch (parallel)
         t0 = time.perf_counter()
-        all_results = _collect_sources_parallel(deduped_queries)
+        all_results = _collect_sources_parallel(deduped_queries, progress_callback)
         state.timings["external_search_collect_ms"] = int((time.perf_counter() - t0) * 1000)
         for q in deduped_queries:
             log(state, f"[ResearcherAgent] Query: '{q}' → collected")
@@ -139,6 +223,17 @@ class ResearcherAgent:
             # Broaden the first query with "survey overview" to get more academic hits
             base_query = deduped_queries[0]
             broader_query = f"{base_query} survey overview"
+            _emit_progress(
+                progress_callback,
+                {
+                    "phase": "searching",
+                    "state": "active",
+                    "title": "Đang mở rộng tìm kiếm học thuật",
+                    "detail": "Số nguồn học thuật còn ít nên Researcher đang thử một truy vấn rộng hơn.",
+                    "message": "Đang mở rộng truy vấn để tìm thêm nguồn học thuật",
+                    "metadata": {"query": broader_query},
+                },
+            )
             t0 = time.perf_counter()
             extra = _collect_sources([broader_query])
             state.timings["external_search_retry_ms"] = int((time.perf_counter() - t0) * 1000)
@@ -151,6 +246,21 @@ class ResearcherAgent:
                     all_results.append(r)
             academic_count = sum(1 for r in all_results if r.get("source_type") in _ACADEMIC_SOURCE_TYPES)
             log(state, f"[ResearcherAgent] After re-search: {len(all_results)} sources ({academic_count} academic)")
+            _emit_progress(
+                progress_callback,
+                {
+                    "phase": "searching",
+                    "state": "completed",
+                    "title": "Đã hoàn thành tìm kiếm mở rộng",
+                    "detail": f"Hiện có {len(all_results)} nguồn, gồm {academic_count} nguồn học thuật.",
+                    "message": f"Đã thu thập {len(all_results)} nguồn",
+                    "metadata": {
+                        "total_sources": len(all_results),
+                        "academic_sources": academic_count,
+                    },
+                    "source_previews": _source_previews(extra),
+                },
+            )
 
         state.external_context = all_results
 
@@ -167,6 +277,21 @@ class ResearcherAgent:
             for i, r in enumerate(all_results)
         )
 
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "synthesizing",
+                "state": "active",
+                "title": "Đang tổng hợp thông tin từ nguồn",
+                "detail": f"Researcher đang trích xuất ghi chú từ {len(all_results)} nguồn đã chọn.",
+                "message": "Đang tổng hợp bằng chứng từ các nguồn đã tìm thấy",
+                "metadata": {
+                    "total_sources": len(all_results),
+                    "academic_sources": academic_count,
+                },
+                "source_previews": _source_previews(all_results),
+            },
+        )
         t0 = time.perf_counter()
         try:
             res = self.llm.invoke([
@@ -194,4 +319,18 @@ class ResearcherAgent:
         })
 
         log(state, f"[ResearcherAgent] {len(all_results)} unique sources ({academic_count} academic) — notes extracted")
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "synthesizing",
+                "state": "completed",
+                "title": "Đã tổng hợp thông tin từ nguồn",
+                "detail": f"Đã chuẩn bị ghi chú từ {len(all_results)} nguồn cho Writer.",
+                "message": "Đã tổng hợp xong bằng chứng nghiên cứu",
+                "metadata": {
+                    "total_sources": len(all_results),
+                    "academic_sources": academic_count,
+                },
+            },
+        )
         return state
