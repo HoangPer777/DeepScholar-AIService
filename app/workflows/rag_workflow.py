@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from app.agents.clarifier import ClarifierAgent
 from app.agents.fast_chat import FastChatAgent
@@ -36,6 +36,40 @@ logger = logging.getLogger(__name__)
 
 def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
+
+
+def _emit_progress(
+    callback: Optional[Callable[[dict], None]],
+    *,
+    phase: str,
+    state: str,
+    title: str,
+    detail: str = "",
+    message: Optional[str] = None,
+    iteration: int = 0,
+    max_iterations: int = 2,
+    metadata: Optional[dict] = None,
+    source_previews: Optional[list[dict]] = None,
+) -> None:
+    """Emit bounded, user-facing workflow events without affecting the pipeline."""
+    if callback is None:
+        return
+    try:
+        callback(
+            {
+                "phase": phase,
+                "state": state,
+                "title": title,
+                "detail": detail,
+                "message": message or title,
+                "iteration": iteration,
+                "max_iterations": max_iterations,
+                "metadata": metadata or {},
+                "source_previews": source_previews or [],
+            }
+        )
+    except Exception:
+        logger.warning("Deep research progress callback failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +209,7 @@ def run_chat_workflow(
     question: str,
     article_id: Optional[int] = None,
     session_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Route to FastChatAgent or full pipeline based on session Research_Context.
 
@@ -197,6 +232,7 @@ def run_chat_workflow(
         question:   The user's research question or follow-up query.
         article_id: Optional article ID for paper-specific (non-deep-research) mode.
         session_id: Optional session UUID for context routing.
+        progress_callback: Optional observer for structured pipeline progress.
 
     Returns:
         Final state dict (keys match ``AgentState`` fields plus any agent-added keys).
@@ -299,22 +335,85 @@ def run_chat_workflow(
     reviewer   = ReviewerAgent(get_safe_llm("reviewer"))
 
     # ── Planner ──────────────────────────────────────────────────────────────
+    _emit_progress(
+        progress_callback,
+        phase="planning",
+        state="active",
+        title="Đang lập kế hoạch nghiên cứu",
+        detail="Planner đang phân tích câu hỏi và xác định phạm vi cần tìm hiểu.",
+    )
     t0 = time.time()
     p0 = time.perf_counter()
     state = planner.run(state)
     state.planner_time = time.time() - t0
     state.timings["planner_ms"] = _elapsed_ms(p0)
     logger.debug("planner_time=%.2fs", state.planner_time)
+    _emit_progress(
+        progress_callback,
+        phase="planning",
+        state="completed",
+        title="Đã lập kế hoạch nghiên cứu",
+        detail=(
+            f"Đã tạo {len(state.search_queries)} truy vấn và xác định "
+            f"{len(state.focus_sections)} nhóm nội dung trọng tâm."
+        ),
+        metadata={
+            "search_queries": state.search_queries[:5],
+            "focus_sections": state.focus_sections[:10],
+            "need_external_search": state.need_external_search,
+        },
+    )
 
     # ── Clarifier ────────────────────────────────────────────────────────────
+    if state.need_clarification:
+        _emit_progress(
+            progress_callback,
+            phase="clarifying",
+            state="active",
+            title="Đang làm rõ câu hỏi nghiên cứu",
+            detail="Clarifier đang chuẩn hóa cách hiểu câu hỏi trước khi tìm nguồn.",
+        )
     p0 = time.perf_counter()
     state = clarifier.run(state)
     state.timings["clarifier_ms"] = _elapsed_ms(p0)
+    if state.need_clarification:
+        _emit_progress(
+            progress_callback,
+            phase="clarifying",
+            state="completed",
+            title="Đã làm rõ câu hỏi nghiên cứu",
+            detail="Câu hỏi đã được chuẩn hóa để sử dụng nhất quán trong pipeline.",
+        )
+    else:
+        _emit_progress(
+            progress_callback,
+            phase="clarifying",
+            state="skipped",
+            title="Câu hỏi đã đủ rõ ràng",
+            detail="Không cần thực hiện thêm bước làm rõ.",
+        )
 
     # ── Researcher ───────────────────────────────────────────────────────────
+    if state.need_external_search:
+        _emit_progress(
+            progress_callback,
+            phase="searching",
+            state="active",
+            title="Đang tìm kiếm nguồn học thuật",
+            detail=f"Researcher đang xử lý tối đa {min(len(state.search_queries), 5)} truy vấn.",
+            metadata={"total_queries": min(len(state.search_queries), 5)},
+        )
+    else:
+        _emit_progress(
+            progress_callback,
+            phase="searching",
+            state="skipped",
+            title="Không cần tìm kiếm nguồn bên ngoài",
+            detail="Planner xác định câu hỏi không yêu cầu tìm kiếm web bổ sung.",
+        )
     t0 = time.time()
     p0 = time.perf_counter()
-    state = researcher.run(state)
+    state = researcher.run(state, progress_callback=progress_callback)
     state.researcher_time = time.time() - t0
     state.timings["researcher_ms"] = _elapsed_ms(p0)
     logger.debug("researcher_time=%.2fs", state.researcher_time)
@@ -326,13 +425,42 @@ def run_chat_workflow(
 
     # ── Writer → Reviewer loop (mirrors _review_router in build_graph.py) ────
     while True:
+        draft_iteration = state.iteration_count + 1
+        _emit_progress(
+            progress_callback,
+            phase="drafting",
+            state="active",
+            title=f"Đang viết bản nháp lần {draft_iteration}",
+            detail="Writer đang tổng hợp bằng chứng và xây dựng báo cáo có trích dẫn.",
+            iteration=draft_iteration,
+            max_iterations=state.max_iterations,
+        )
         t0 = time.time()
         p0 = time.perf_counter()
         state = writer.run(state)
         state.writer_time = time.time() - t0
         state.timings["writer_ms"] = state.timings.get("writer_ms", 0) + _elapsed_ms(p0)
         logger.debug("writer_time=%.2fs", state.writer_time)
+        _emit_progress(
+            progress_callback,
+            phase="drafting",
+            state="completed",
+            title=f"Đã hoàn thành bản nháp lần {draft_iteration}",
+            detail="Bản nháp đã sẵn sàng để kiểm tra chất lượng.",
+            iteration=draft_iteration,
+            max_iterations=state.max_iterations,
+            metadata={"draft_length": len(state.draft_answer or "")},
+        )
 
+        _emit_progress(
+            progress_callback,
+            phase="reviewing",
+            state="active",
+            title=f"Đang đánh giá bản nháp lần {draft_iteration}",
+            detail="Reviewer đang kiểm tra độ đầy đủ, trích dẫn và chất lượng nguồn.",
+            iteration=draft_iteration,
+            max_iterations=state.max_iterations,
+        )
         t0 = time.time()
         p0 = time.perf_counter()
         state = reviewer.run(state)
@@ -340,16 +468,55 @@ def run_chat_workflow(
         state.timings["reviewer_ms"] = state.timings.get("reviewer_ms", 0) + _elapsed_ms(p0)
         logger.debug("reviewer_time=%.2fs", state.reviewer_time)
 
-        # Replicate _review_router logic from build_graph.py
-        if (
+        should_rewrite = (
             state.reviewed_answer is None
             and state.confidence_score < 0.7
             and state.iteration_count < state.max_iterations
-        ):
+        )
+        review_decision = (
+            "accept" if state.reviewed_answer is not None
+            else "rewrite" if should_rewrite
+            else "rejected"
+        )
+        _emit_progress(
+            progress_callback,
+            phase="reviewing",
+            state="completed",
+            title=f"Đã đánh giá bản nháp lần {state.iteration_count}",
+            detail=state.review_feedback or "Reviewer không cung cấp phản hồi bổ sung.",
+            iteration=state.iteration_count,
+            max_iterations=state.max_iterations,
+            metadata={
+                "score": state.confidence_score,
+                "decision": review_decision,
+                "iteration": state.iteration_count,
+            },
+        )
+
+        # Replicate _review_router logic from build_graph.py
+        if should_rewrite:
             # Trigger rewrite loop
+            _emit_progress(
+                progress_callback,
+                phase="rewriting",
+                state="active",
+                title=f"Chuẩn bị viết lại bản nháp lần {state.iteration_count + 1}",
+                detail=state.review_feedback or "Bản nháp cần được cải thiện theo đánh giá chất lượng.",
+                iteration=state.iteration_count + 1,
+                max_iterations=state.max_iterations,
+            )
             continue
         break
 
+    _emit_progress(
+        progress_callback,
+        phase="finalizing",
+        state="active",
+        title="Đang hoàn thiện báo cáo",
+        detail="DeepScholar đang đóng gói nội dung, nguồn và metadata cuối cùng.",
+        iteration=state.iteration_count,
+        max_iterations=state.max_iterations,
+    )
     result = state.model_dump()
 
     # ── Task 7.2: save Research_Context after pipeline ───────────────────────
@@ -387,4 +554,21 @@ def run_chat_workflow(
             state.reviewer_time,
         )
 
+    _emit_progress(
+        progress_callback,
+        phase="completed",
+        state="completed",
+        title="Đã hoàn thành báo cáo nghiên cứu",
+        detail=(
+            f"Báo cáo hoàn thành với "
+            f"{len([s for s in state.external_context if s.get('title') != '__research_notes__'])} nguồn."
+        ),
+        message="Báo cáo nghiên cứu đã hoàn thành",
+        iteration=state.iteration_count,
+        max_iterations=state.max_iterations,
+        metadata={
+            "confidence_score": state.confidence_score,
+            "iterations_used": state.iteration_count,
+        },
+    )
     return result

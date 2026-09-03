@@ -273,7 +273,7 @@ def test_agent_state_default_max_iterations():
     from app.workflows.states import AgentState
 
     state = AgentState(question="test question")
-    assert state.max_iterations == 1
+    assert state.max_iterations == 2
 
 
 def test_follow_up_response_has_is_fast_chat_field():
