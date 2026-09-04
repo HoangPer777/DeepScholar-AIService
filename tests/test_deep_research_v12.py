@@ -471,6 +471,7 @@ class TestSafeLLM:
         from app.core.safe_llm import SafeLLM
 
         groq_mock = self._make_mock_groq("groq response")
+        groq_mock.model_name = "llama-3.1-8b-instant"
         llm = SafeLLM("planner", ["openai/gpt-oss-120b:free"], groq_mock)
 
         with patch("app.core.safe_llm.settings") as mock_settings:
@@ -479,6 +480,10 @@ class TestSafeLLM:
 
         groq_mock.invoke.assert_called_once()
         assert result.content == "groq response"
+        usage = llm.usage_snapshot()
+        assert usage["selected_model"] == "llama-3.1-8b-instant"
+        assert usage["selected_provider"] == "Groq"
+        assert usage["fallback_used"] is True
 
     def test_returns_first_successful_model(self):
         """Trả về kết quả từ model đầu tiên thành công."""
@@ -500,6 +505,10 @@ class TestSafeLLM:
 
         assert result.content == "model-a response"
         groq_mock.invoke.assert_not_called()
+        usage = llm.usage_snapshot()
+        assert usage["selected_model"] == "model-a"
+        assert usage["selected_provider"] == "OpenRouter"
+        assert usage["attempts"][0]["status"] == "success"
 
     def test_falls_back_to_next_model_on_failure(self):
         """Khi model đầu fail → thử model tiếp theo."""
@@ -525,6 +534,10 @@ class TestSafeLLM:
 
         assert result.content == "model-b response"
         groq_mock.invoke.assert_not_called()
+        usage = llm.usage_snapshot()
+        assert usage["selected_model"] == "model-b"
+        assert usage["selected_provider"] == "OpenRouter"
+        assert [attempt["status"] for attempt in usage["attempts"]] == ["failed", "success"]
 
     def test_falls_back_to_groq_when_all_fail(self):
         """Khi tất cả OpenRouter models fail → dùng Groq emergency fallback."""
@@ -546,6 +559,10 @@ class TestSafeLLM:
 
         groq_mock.invoke.assert_called_once()
         assert result.content == "groq emergency response"
+        usage = llm.usage_snapshot()
+        assert usage["selected_model"] == "configured-groq-model"
+        assert usage["selected_provider"] == "Groq"
+        assert usage["fallback_used"] is True
 
     @given(
         num_failing=st.integers(min_value=0, max_value=5),
