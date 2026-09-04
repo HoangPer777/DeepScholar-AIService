@@ -41,7 +41,10 @@ def _emit_progress(callback: Optional[Callable[[dict], None]], event: dict) -> N
     if callback is None:
         return
     try:
-        callback(event)
+        # Researcher emits query-level events from worker threads. Attach a
+        # stable public agent id while keeping the payload free of hidden model
+        # reasoning or runtime objects.
+        callback({**event, "agent": "researcher"})
     except Exception:
         logger.warning("Researcher progress callback failed", exc_info=True)
 
@@ -118,12 +121,14 @@ def _collect_sources_parallel(
 
     with ThreadPoolExecutor(max_workers=min(len(capped), MAX_QUERIES)) as executor:
         futures = {executor.submit(fetch_one, q): q for q in capped}
+        query_started = {q: time.perf_counter() for q in capped}
         completed_queries = 0
         for future in as_completed(futures):
             query = futures[future]
             completed_queries += 1
             try:
                 results = future.result()
+                duration_ms = int((time.perf_counter() - query_started[query]) * 1000)
                 with lock:
                     for r in results:
                         url = r.get("url") or ""
@@ -137,17 +142,27 @@ def _collect_sources_parallel(
                     {
                         "phase": "searching",
                         "state": "completed",
-                        "title": f"Đã tìm kiếm: {query[:120]}",
+                        "title": f"Search complete: {query[:120]}",
                         "detail": (
-                            f"Hoàn thành {completed_queries}/{len(capped)} truy vấn; "
-                            f"nhận được {len(results)} kết quả trước khi khử trùng lặp."
+                            f"Completed {completed_queries}/{len(capped)} queries; "
+                            f"received {len(results)} results before deduplication."
                         ),
-                        "message": f"Đã hoàn thành {completed_queries}/{len(capped)} truy vấn tìm kiếm",
+                        "message": f"Completed {completed_queries}/{len(capped)} search queries",
                         "metadata": {
                             "query": query,
                             "completed_queries": completed_queries,
                             "total_queries": len(capped),
                             "found_sources": len(results),
+                            "duration_ms": duration_ms,
+                            "source_types": {
+                                source_type: sum(
+                                    1 for item in results
+                                    if item.get("source_type", "web") == source_type
+                                )
+                                for source_type in sorted(
+                                    {item.get("source_type", "web") for item in results}
+                                )
+                            },
                         },
                         "source_previews": _source_previews(results),
                     },
@@ -161,16 +176,17 @@ def _collect_sources_parallel(
                     {
                         "phase": "searching",
                         "state": "failed",
-                        "title": "Một truy vấn tìm kiếm chưa thành công",
+                        "title": "A search query failed",
                         "detail": (
-                            f"Không thể hoàn thành truy vấn '{query[:160]}'; "
-                            "pipeline vẫn tiếp tục với các truy vấn còn lại."
+                            f"Unable to complete query '{query[:160]}'; "
+                            "the pipeline will continue with the remaining queries."
                         ),
-                        "message": f"Đã xử lý {completed_queries}/{len(capped)} truy vấn tìm kiếm",
+                        "message": f"Processed {completed_queries}/{len(capped)} search queries",
                         "metadata": {
                             "query": query,
                             "completed_queries": completed_queries,
                             "total_queries": len(capped),
+                            "duration_ms": int((time.perf_counter() - query_started[query]) * 1000),
                         },
                     },
                 )
@@ -193,8 +209,8 @@ class ResearcherAgent:
                 {
                     "phase": "synthesizing",
                     "state": "skipped",
-                    "title": "Không cần tổng hợp nguồn bên ngoài",
-                    "detail": "Pipeline tiếp tục với ngữ cảnh hiện có.",
+                    "title": "No external source synthesis needed",
+                    "detail": "The pipeline is continuing with the available context.",
                 },
             )
             return state
@@ -228,9 +244,9 @@ class ResearcherAgent:
                 {
                     "phase": "searching",
                     "state": "active",
-                    "title": "Đang mở rộng tìm kiếm học thuật",
-                    "detail": "Số nguồn học thuật còn ít nên Researcher đang thử một truy vấn rộng hơn.",
-                    "message": "Đang mở rộng truy vấn để tìm thêm nguồn học thuật",
+                    "title": "Expanding academic search",
+                    "detail": "The academic source count is low, so ResearcherAgent is trying a broader query.",
+                    "message": "Expanding the query to find more academic sources",
                     "metadata": {"query": broader_query},
                 },
             )
@@ -251,9 +267,9 @@ class ResearcherAgent:
                 {
                     "phase": "searching",
                     "state": "completed",
-                    "title": "Đã hoàn thành tìm kiếm mở rộng",
-                    "detail": f"Hiện có {len(all_results)} nguồn, gồm {academic_count} nguồn học thuật.",
-                    "message": f"Đã thu thập {len(all_results)} nguồn",
+                    "title": "Expanded search complete",
+                    "detail": f"There are now {len(all_results)} sources, including {academic_count} academic sources.",
+                    "message": f"Collected {len(all_results)} sources",
                     "metadata": {
                         "total_sources": len(all_results),
                         "academic_sources": academic_count,
@@ -282,9 +298,9 @@ class ResearcherAgent:
             {
                 "phase": "synthesizing",
                 "state": "active",
-                "title": "Đang tổng hợp thông tin từ nguồn",
-                "detail": f"Researcher đang trích xuất ghi chú từ {len(all_results)} nguồn đã chọn.",
-                "message": "Đang tổng hợp bằng chứng từ các nguồn đã tìm thấy",
+                "title": "Synthesizing source evidence",
+                "detail": f"ResearcherAgent is extracting notes from {len(all_results)} selected sources.",
+                "message": "Synthesizing evidence from discovered sources",
                 "metadata": {
                     "total_sources": len(all_results),
                     "academic_sources": academic_count,
@@ -324,9 +340,9 @@ class ResearcherAgent:
             {
                 "phase": "synthesizing",
                 "state": "completed",
-                "title": "Đã tổng hợp thông tin từ nguồn",
-                "detail": f"Đã chuẩn bị ghi chú từ {len(all_results)} nguồn cho Writer.",
-                "message": "Đã tổng hợp xong bằng chứng nghiên cứu",
+                "title": "Source synthesis complete",
+                "detail": f"Prepared notes from {len(all_results)} sources for WriterAgent.",
+                "message": "Research evidence synthesis complete",
                 "metadata": {
                     "total_sources": len(all_results),
                     "academic_sources": academic_count,

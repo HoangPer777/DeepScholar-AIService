@@ -25,6 +25,7 @@ from app.agents.reader import ReaderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.writer import WriterAgent
+from app.core.config import settings
 from app.core.llm import get_safe_llm
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.core.redis_client import create_redis_client
@@ -38,11 +39,42 @@ def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
 
 
+def _describe_model(llm) -> dict:
+    """Return safe, user-facing model metadata without exposing credentials."""
+    usage_snapshot = getattr(llm, "usage_snapshot", None)
+    if callable(usage_snapshot):
+        return usage_snapshot()
+
+    candidates = getattr(llm, "candidates", None)
+    if isinstance(candidates, list) and candidates:
+        return {
+            "provider": "OpenRouter",
+            "model": None,
+            "status": "configured",
+            "routing": f"OpenRouter candidates · {len(candidates)} available",
+            "available_models": [str(candidate) for candidate in candidates],
+            "attempts": [],
+        }
+
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+    if not isinstance(model, str) or not model.strip():
+        model = getattr(settings, "GROQ_LLM_MODEL", "Configured model")
+    return {
+        "provider": str(getattr(settings, "AGENT_LLM_PROVIDER", "Configured")).title(),
+        "model": str(model),
+        "routing": "Direct provider",
+        "status": "configured",
+        "fallback_used": False,
+        "attempts": [],
+    }
+
+
 def _emit_progress(
     callback: Optional[Callable[[dict], None]],
     *,
     phase: str,
     state: str,
+    agent: str = "system",
     title: str,
     detail: str = "",
     message: Optional[str] = None,
@@ -59,6 +91,7 @@ def _emit_progress(
             {
                 "phase": phase,
                 "state": state,
+                "agent": agent,
                 "title": title,
                 "detail": detail,
                 "message": message or title,
@@ -327,24 +360,43 @@ def run_chat_workflow(
     state = AgentState(question=question, article_id=article_id)
 
     # Instantiate agents (same models as build_graph.py)
-    planner    = PlannerAgent(get_safe_llm("planner"))
-    clarifier  = ClarifierAgent(get_safe_llm("clarifier"))
-    researcher = ResearcherAgent(get_safe_llm("researcher"))
+    planner_llm = get_safe_llm("planner")
+    clarifier_llm = get_safe_llm("clarifier")
+    researcher_llm = get_safe_llm("researcher")
+    reviewer_llm = get_safe_llm("reviewer")
+    planner    = PlannerAgent(planner_llm)
+    clarifier  = ClarifierAgent(clarifier_llm)
+    researcher = ResearcherAgent(researcher_llm)
     reader     = ReaderAgent()
-    writer     = WriterAgent(get_safe_llm("writer"))
-    reviewer   = ReviewerAgent(get_safe_llm("reviewer"))
+    writer_llm = get_safe_llm("writer")
+    writer     = WriterAgent(writer_llm)
+    writer_model_config = _describe_model(writer_llm)
+    reviewer   = ReviewerAgent(reviewer_llm)
+    model_usage: dict[str, dict] = {
+        "reader": {
+            "agent": "reader",
+            "provider": "Internal retrieval",
+            "model": None,
+            "status": "not_applicable",
+            "routing": "PGVector context",
+            "fallback_used": False,
+            "attempts": [],
+        },
+    }
 
     # ── Planner ──────────────────────────────────────────────────────────────
     _emit_progress(
         progress_callback,
         phase="planning",
         state="active",
-        title="Đang lập kế hoạch nghiên cứu",
-        detail="Planner đang phân tích câu hỏi và xác định phạm vi cần tìm hiểu.",
+        agent="planner",
+        title="Planning research",
+        detail="PlannerAgent is analyzing the question and defining the research scope.",
     )
     t0 = time.time()
     p0 = time.perf_counter()
     state = planner.run(state)
+    model_usage["planner"] = _describe_model(planner_llm)
     state.planner_time = time.time() - t0
     state.timings["planner_ms"] = _elapsed_ms(p0)
     logger.debug("planner_time=%.2fs", state.planner_time)
@@ -352,15 +404,19 @@ def run_chat_workflow(
         progress_callback,
         phase="planning",
         state="completed",
-        title="Đã lập kế hoạch nghiên cứu",
+        agent="planner",
+        title="Research plan complete",
         detail=(
-            f"Đã tạo {len(state.search_queries)} truy vấn và xác định "
-            f"{len(state.focus_sections)} nhóm nội dung trọng tâm."
+            f"Created {len(state.search_queries)} queries and identified "
+            f"{len(state.focus_sections)} focus areas."
         ),
         metadata={
             "search_queries": state.search_queries[:5],
             "focus_sections": state.focus_sections[:10],
             "need_external_search": state.need_external_search,
+            "model": model_usage["planner"].get("model"),
+            "provider": model_usage["planner"].get("provider"),
+            "duration_ms": state.timings["planner_ms"],
         },
     )
 
@@ -370,27 +426,33 @@ def run_chat_workflow(
             progress_callback,
             phase="clarifying",
             state="active",
-            title="Đang làm rõ câu hỏi nghiên cứu",
-            detail="Clarifier đang chuẩn hóa cách hiểu câu hỏi trước khi tìm nguồn.",
+            agent="clarifier",
+            title="Clarifying the research question",
+            detail="ClarifierAgent is standardizing the interpretation before source discovery.",
         )
     p0 = time.perf_counter()
     state = clarifier.run(state)
+    model_usage["clarifier"] = _describe_model(clarifier_llm)
     state.timings["clarifier_ms"] = _elapsed_ms(p0)
     if state.need_clarification:
         _emit_progress(
             progress_callback,
             phase="clarifying",
             state="completed",
-            title="Đã làm rõ câu hỏi nghiên cứu",
-            detail="Câu hỏi đã được chuẩn hóa để sử dụng nhất quán trong pipeline.",
+            agent="clarifier",
+            title="Research question clarified",
+            detail="The question has been normalized for consistent use across the pipeline.",
+            metadata={"duration_ms": state.timings["clarifier_ms"]},
         )
     else:
         _emit_progress(
             progress_callback,
             phase="clarifying",
             state="skipped",
-            title="Câu hỏi đã đủ rõ ràng",
-            detail="Không cần thực hiện thêm bước làm rõ.",
+            agent="clarifier",
+            title="Question is already clear",
+            detail="No additional clarification was needed.",
+            metadata={"duration_ms": state.timings["clarifier_ms"]},
         )
 
     # ── Researcher ───────────────────────────────────────────────────────────
@@ -399,8 +461,9 @@ def run_chat_workflow(
             progress_callback,
             phase="searching",
             state="active",
-            title="Đang tìm kiếm nguồn học thuật",
-            detail=f"Researcher đang xử lý tối đa {min(len(state.search_queries), 5)} truy vấn.",
+            agent="researcher",
+            title="Searching academic sources",
+            detail=f"ResearcherAgent is processing up to {min(len(state.search_queries), 5)} queries.",
             metadata={"total_queries": min(len(state.search_queries), 5)},
         )
     else:
@@ -408,20 +471,49 @@ def run_chat_workflow(
             progress_callback,
             phase="searching",
             state="skipped",
-            title="Không cần tìm kiếm nguồn bên ngoài",
-            detail="Planner xác định câu hỏi không yêu cầu tìm kiếm web bổ sung.",
+            agent="researcher",
+            title="No external search needed",
+            detail="PlannerAgent determined that no additional web search is required.",
         )
     t0 = time.time()
     p0 = time.perf_counter()
     state = researcher.run(state, progress_callback=progress_callback)
+    model_usage["researcher"] = _describe_model(researcher_llm)
     state.researcher_time = time.time() - t0
     state.timings["researcher_ms"] = _elapsed_ms(p0)
     logger.debug("researcher_time=%.2fs", state.researcher_time)
 
     # ── Reader ───────────────────────────────────────────────────────────────
+    _emit_progress(
+        progress_callback,
+        phase="synthesizing",
+        state="skipped" if article_id is None else "active",
+        agent="reader",
+        title=(
+            "ReaderAgent skipped"
+            if article_id is None
+            else "ReaderAgent is reading internal documents"
+        ),
+        detail=(
+            "This session has no linked internal document; continuing with external sources."
+            if article_id is None
+            else "ReaderAgent is retrieving relevant passages from the personal library."
+        ),
+    )
     p0 = time.perf_counter()
     state = reader.run(state)
+    model_usage["reader"]["duration_ms"] = _elapsed_ms(p0)
     state.timings["reader_ms"] = _elapsed_ms(p0)
+    if article_id is not None:
+        _emit_progress(
+            progress_callback,
+            phase="synthesizing",
+            state="completed",
+            agent="reader",
+            title="ReaderAgent finished retrieval",
+            detail="Relevant internal passages are ready for synthesis.",
+            metadata={"duration_ms": state.timings["reader_ms"]},
+        )
 
     # ── Writer → Reviewer loop (mirrors _review_router in build_graph.py) ────
     while True:
@@ -430,14 +522,24 @@ def run_chat_workflow(
             progress_callback,
             phase="drafting",
             state="active",
-            title=f"Đang viết bản nháp lần {draft_iteration}",
-            detail="Writer đang tổng hợp bằng chứng và xây dựng báo cáo có trích dẫn.",
+            agent="writer",
+            title=f"Writing draft {draft_iteration}",
+            detail=(
+                "WriterAgent is synthesizing evidence and building a cited report."
+                + (f" Focus: {', '.join(state.focus_sections[:4])}." if state.focus_sections else "")
+            ),
             iteration=draft_iteration,
             max_iterations=state.max_iterations,
+            metadata={
+                "model_status": "selecting",
+                "available_models": writer_model_config.get("available_models", []),
+            },
         )
         t0 = time.time()
         p0 = time.perf_counter()
         state = writer.run(state)
+        model_usage["writer"] = _describe_model(writer_llm)
+        writer_model = model_usage["writer"]
         state.writer_time = time.time() - t0
         state.timings["writer_ms"] = state.timings.get("writer_ms", 0) + _elapsed_ms(p0)
         logger.debug("writer_time=%.2fs", state.writer_time)
@@ -445,25 +547,36 @@ def run_chat_workflow(
             progress_callback,
             phase="drafting",
             state="completed",
-            title=f"Đã hoàn thành bản nháp lần {draft_iteration}",
-            detail="Bản nháp đã sẵn sàng để kiểm tra chất lượng.",
+            agent="writer",
+            title=f"Draft {draft_iteration} complete",
+            detail="The draft is ready for quality review.",
             iteration=draft_iteration,
             max_iterations=state.max_iterations,
-            metadata={"draft_length": len(state.draft_answer or "")},
+            metadata={
+                "draft_length": len(state.draft_answer or ""),
+                "model": writer_model.get("model"),
+                "provider": writer_model.get("provider"),
+                "model_status": writer_model.get("status"),
+                "fallback_used": writer_model.get("fallback_used", False),
+                "model_attempts": writer_model.get("attempts", []),
+                "duration_ms": state.timings.get("writer_ms", 0),
+            },
         )
 
         _emit_progress(
             progress_callback,
             phase="reviewing",
             state="active",
-            title=f"Đang đánh giá bản nháp lần {draft_iteration}",
-            detail="Reviewer đang kiểm tra độ đầy đủ, trích dẫn và chất lượng nguồn.",
+            agent="reviewer",
+            title=f"Reviewing draft {draft_iteration}",
+            detail="ReviewerAgent is checking completeness, citations, and source quality.",
             iteration=draft_iteration,
             max_iterations=state.max_iterations,
         )
         t0 = time.time()
         p0 = time.perf_counter()
         state = reviewer.run(state)
+        model_usage["reviewer"] = _describe_model(reviewer_llm)
         state.reviewer_time = time.time() - t0
         state.timings["reviewer_ms"] = state.timings.get("reviewer_ms", 0) + _elapsed_ms(p0)
         logger.debug("reviewer_time=%.2fs", state.reviewer_time)
@@ -482,14 +595,21 @@ def run_chat_workflow(
             progress_callback,
             phase="reviewing",
             state="completed",
-            title=f"Đã đánh giá bản nháp lần {state.iteration_count}",
-            detail=state.review_feedback or "Reviewer không cung cấp phản hồi bổ sung.",
+            agent="reviewer",
+            title=f"Draft {state.iteration_count} reviewed",
+            detail=state.review_feedback or "ReviewerAgent did not provide additional feedback.",
             iteration=state.iteration_count,
             max_iterations=state.max_iterations,
             metadata={
                 "score": state.confidence_score,
                 "decision": review_decision,
                 "iteration": state.iteration_count,
+                "focus_sections": state.focus_sections[:6],
+                "model": model_usage["reviewer"].get("model"),
+                "provider": model_usage["reviewer"].get("provider"),
+                "model_status": model_usage["reviewer"].get("status"),
+                "model_attempts": model_usage["reviewer"].get("attempts", []),
+                "duration_ms": state.timings.get("reviewer_ms", 0),
             },
         )
 
@@ -500,8 +620,9 @@ def run_chat_workflow(
                 progress_callback,
                 phase="rewriting",
                 state="active",
-                title=f"Chuẩn bị viết lại bản nháp lần {state.iteration_count + 1}",
-                detail=state.review_feedback or "Bản nháp cần được cải thiện theo đánh giá chất lượng.",
+                agent="writer",
+                title=f"Preparing draft rewrite {state.iteration_count + 1}",
+                detail=state.review_feedback or "The draft needs improvement based on the quality review.",
                 iteration=state.iteration_count + 1,
                 max_iterations=state.max_iterations,
             )
@@ -512,12 +633,15 @@ def run_chat_workflow(
         progress_callback,
         phase="finalizing",
         state="active",
-        title="Đang hoàn thiện báo cáo",
-        detail="DeepScholar đang đóng gói nội dung, nguồn và metadata cuối cùng.",
+        agent="system",
+        title="Finalizing the report",
+        detail="DeepScholar is packaging the final content, sources, and metadata.",
         iteration=state.iteration_count,
         max_iterations=state.max_iterations,
     )
     result = state.model_dump()
+    result["writer_model"] = model_usage.get("writer", writer_model_config)
+    result["model_usage"] = model_usage
 
     # ── Task 7.2: save Research_Context after pipeline ───────────────────────
     if session_id and (result.get("reviewed_answer") or result.get("draft_answer")):
@@ -558,17 +682,19 @@ def run_chat_workflow(
         progress_callback,
         phase="completed",
         state="completed",
-        title="Đã hoàn thành báo cáo nghiên cứu",
+        agent="system",
+        title="Research report complete",
         detail=(
-            f"Báo cáo hoàn thành với "
-            f"{len([s for s in state.external_context if s.get('title') != '__research_notes__'])} nguồn."
+            f"Report completed with "
+            f"{len([s for s in state.external_context if s.get('title') != '__research_notes__'])} sources."
         ),
-        message="Báo cáo nghiên cứu đã hoàn thành",
+        message="Research report completed",
         iteration=state.iteration_count,
         max_iterations=state.max_iterations,
         metadata={
             "confidence_score": state.confidence_score,
             "iterations_used": state.iteration_count,
+            "total_latency_ms": state.timings.get("total_latency_ms", 0),
         },
     )
     return result

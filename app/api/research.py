@@ -37,6 +37,16 @@ _PROGRESS_PHASES = {
     "failed",
 }
 _ACTIVITY_STATES = {"active", "completed", "skipped", "failed"}
+_RESEARCH_AGENTS = {
+    "system",
+    "planner",
+    "clarifier",
+    "researcher",
+    "reader",
+    "writer",
+    "reviewer",
+    "fast_chat",
+}
 _MAX_ACTIVITIES = 50
 _MAX_SOURCE_PREVIEWS = 20
 _MAX_DETAIL_LENGTH = 500
@@ -89,6 +99,43 @@ def _sanitize_source_preview(source: dict) -> dict | None:
     }
 
 
+def _sanitize_model_info(value: dict | None) -> dict | None:
+    """Keep model telemetry explicit while excluding provider internals."""
+    if not isinstance(value, dict):
+        return None
+
+    cleaned = {
+        "agent": _truncate(value.get("agent"), 40) or None,
+        "provider": _truncate(value.get("provider"), 80) or "Unknown",
+        "model": _truncate(value.get("model"), 180) or None,
+        "selected_provider": _truncate(value.get("selected_provider"), 80) or None,
+        "selected_model": _truncate(value.get("selected_model"), 180) or None,
+        "status": _truncate(value.get("status"), 40) or "unknown",
+        "routing": _truncate(value.get("routing"), 120) or None,
+        "fallback_used": bool(value.get("fallback_used", False)),
+        "invocations": max(0, int(value.get("invocations", 0) or 0)),
+        "available_models": [
+            _truncate(model, 180)
+            for model in list(value.get("available_models") or [])[:8]
+            if _truncate(model, 180)
+        ],
+        "attempts": [],
+    }
+    for attempt in list(value.get("attempts") or [])[:8]:
+        if not isinstance(attempt, dict):
+            continue
+        cleaned["attempts"].append(
+            {
+                "model": _truncate(attempt.get("model"), 180),
+                "provider": _truncate(attempt.get("provider"), 80),
+                "status": _truncate(attempt.get("status"), 40),
+                "error_type": _truncate(attempt.get("error_type"), 60) or None,
+                "duration_ms": max(0, int(attempt.get("duration_ms", 0) or 0)),
+            }
+        )
+    return cleaned
+
+
 def _initial_job_snapshot(debug: bool = False) -> dict:
     now = _utc_now()
     return {
@@ -96,7 +143,7 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
         "debug": debug,
         "progress": {
             "phase": "queued",
-            "message": "Yêu cầu nghiên cứu đã được tiếp nhận",
+            "message": "Research request accepted",
             "iteration": 0,
             "max_iterations": 2,
             "started_at": now,
@@ -107,8 +154,9 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
                 "sequence": 1,
                 "phase": "queued",
                 "state": "completed",
-                "title": "Đã tiếp nhận yêu cầu nghiên cứu",
-                "detail": "DeepScholar đang chuẩn bị pipeline nghiên cứu.",
+                "agent": "system",
+                "title": "Research request accepted",
+                "detail": "DeepScholar is preparing the research pipeline.",
                 "timestamp": now,
                 "metadata": {},
             }
@@ -143,6 +191,10 @@ class _ProgressEmitter:
             if activity_state not in _ACTIVITY_STATES:
                 activity_state = "active"
 
+            agent = event.get("agent", "system")
+            if agent not in _RESEARCH_AGENTS:
+                agent = "system"
+
             now = _utc_now()
             current_progress = self._snapshot.get("progress", {})
             iteration = event.get("iteration", current_progress.get("iteration", 0))
@@ -165,6 +217,7 @@ class _ProgressEmitter:
                 "sequence": self._sequence,
                 "phase": phase,
                 "state": activity_state,
+                "agent": agent,
                 "title": _truncate(event.get("title") or message, 200),
                 "detail": _truncate(event.get("detail")),
                 "timestamp": now,
@@ -263,6 +316,12 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
         },
         "confidence_score":  result.get("confidence_score", 0.0),
         "iterations_used":   result.get("iteration_count", 0),
+        "writer_model":       _sanitize_model_info(result.get("writer_model")),
+        "model_usage": {
+            str(agent): _sanitize_model_info(info)
+            for agent, info in list((result.get("model_usage") or {}).items())[:8]
+            if _sanitize_model_info(info) is not None
+        },
         "decision": "accept" if result.get("reviewed_answer") else "rejected",
         "review_feedback":   result.get("review_feedback"),
     }
@@ -319,9 +378,9 @@ async def _run_job(
             {
                 "phase": "failed",
                 "state": "failed",
-                "title": "Không thể hoàn thành nghiên cứu",
-                "detail": f"Pipeline dừng tại giai đoạn {current_phase}.",
-                "message": "Nghiên cứu đã dừng do lỗi",
+                "title": "Unable to complete research",
+                "detail": f"Pipeline stopped during {current_phase}.",
+                "message": "Research stopped due to an error",
                 "metadata": {"failed_phase": current_phase},
             }
         )

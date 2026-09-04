@@ -15,7 +15,43 @@ def test_initial_job_snapshot_is_backward_compatible():
     assert snapshot["progress"]["phase"] == "queued"
     assert snapshot["activities"][0]["sequence"] == 1
     assert snapshot["activities"][0]["state"] == "completed"
+    assert snapshot["activities"][0]["agent"] == "system"
     assert snapshot["source_previews"] == []
+
+
+def test_build_response_exposes_writer_model_metadata():
+    response = research._build_response(
+        {
+            "writer_model": {
+                "provider": "OpenRouter",
+                "model": "openai/gpt-oss-20b:free",
+                "routing": "Fallback routing · 3 candidates",
+                "status": "selected",
+                "fallback_used": False,
+                "attempts": [
+                    {
+                        "model": "openai/gpt-oss-20b:free",
+                        "provider": "OpenRouter",
+                        "status": "success",
+                        "duration_ms": 42,
+                    }
+                ],
+            },
+            "model_usage": {
+                "writer": {
+                    "provider": "OpenRouter",
+                    "model": "openai/gpt-oss-20b:free",
+                    "status": "selected",
+                }
+            },
+        },
+        "task-model",
+    )
+
+    assert response["writer_model"]["provider"] == "OpenRouter"
+    assert response["writer_model"]["model"] == "openai/gpt-oss-20b:free"
+    assert response["writer_model"]["attempts"][0]["duration_ms"] == 42
+    assert response["model_usage"]["writer"]["model"] == "openai/gpt-oss-20b:free"
 
 
 def test_progress_emitter_bounds_and_sanitizes_payload():
@@ -28,6 +64,7 @@ def test_progress_emitter_bounds_and_sanitizes_payload():
                 {
                     "phase": "searching",
                     "state": "completed",
+                    "agent": "researcher",
                     "title": f"Query {index}",
                     "detail": "x" * 700,
                     "metadata": {"completed_queries": index + 1},
@@ -76,6 +113,7 @@ def test_progress_emitter_failure_does_not_escape():
         )
 
     assert emitter.snapshot["progress"]["phase"] == "planning"
+    assert emitter.snapshot["activities"][-1]["agent"] == "system"
 
 
 def test_unknown_phase_is_ignored():
@@ -116,6 +154,7 @@ def test_researcher_parallel_search_reports_each_query(monkeypatch):
     }
     assert sorted(event["metadata"]["completed_queries"] for event in events) == [1, 2]
     assert all(event["source_previews"] for event in events)
+    assert all(event["agent"] == "researcher" for event in events)
 
 
 def test_full_workflow_emits_review_rewrite_and_completion():
@@ -148,6 +187,7 @@ def test_full_workflow_emits_review_rewrite_and_completion():
                     {
                         "phase": "synthesizing",
                         "state": "completed",
+                        "agent": "researcher",
                         "title": "Sources ready",
                     }
                 )
@@ -209,6 +249,28 @@ def test_full_workflow_emits_review_rewrite_and_completion():
     assert "rewriting" in phases
     assert phases[-2:] == ["finalizing", "completed"]
     assert result["reviewed_answer"] == "Draft 2"
+
+    workflow_agent_by_title = {
+        event["title"]: event.get("agent")
+        for event in events
+        if event.get("title") in {
+            "Planning research",
+            "Clarifying the research question",
+            "Question is already clear",
+            "Searching academic sources",
+            "Writing draft 1",
+            "Reviewing draft 1",
+            "Finalizing the report",
+            "Research report complete",
+        }
+    }
+    assert workflow_agent_by_title["Planning research"] == "planner"
+    assert workflow_agent_by_title["Question is already clear"] == "clarifier"
+    assert workflow_agent_by_title["Searching academic sources"] == "researcher"
+    assert workflow_agent_by_title["Writing draft 1"] == "writer"
+    assert workflow_agent_by_title["Reviewing draft 1"] == "reviewer"
+    assert workflow_agent_by_title["Finalizing the report"] == "system"
+    assert workflow_agent_by_title["Research report complete"] == "system"
 
     review_events = [
         event
