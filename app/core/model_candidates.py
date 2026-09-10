@@ -7,8 +7,8 @@ model is rate-limited or unavailable.
 """
 
 _STRONG_FREE_MODELS = [
-    # "deepseek/deepseek-v3.2",
-    # "openai/gpt-oss-120b",
+    "deepseek/deepseek-v3.2",
+    "openai/gpt-oss-120b",
     "minimax/minimax-m3:free",
 
     "nvidia/nemotron-3-super-120b-a12b:free",
@@ -21,6 +21,7 @@ _STRONG_FREE_MODELS = [
 ]
 
 _FAST_FREE_MODELS = [
+    "openai/gpt-oss-120b",
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "poolside/laguna-xs-2.1:free",
     "openai/gpt-oss-20b:free",
