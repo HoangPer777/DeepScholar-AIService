@@ -3,7 +3,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.core.safe_llm import AllLLMProvidersFailed
 from app.core.utils import effective_question, log
 from app.prompts.writer_prompt import WRITER_PROMPT
-from app.tools.citation import format_apa_reference
+from app.tools.citation import (
+    canonicalize_references,
+    format_apa_reference,
+    select_citable_sources,
+)
 from app.workflows.states import AgentState
 
 
@@ -26,29 +30,36 @@ class WriterAgent:
             "No external research available.",
         )
 
-        # Build source index — exclude the internal research_notes entry
+        # Use one bounded evidence-bearing set for indexes, excerpts, and
+        # canonical references. Public indexes remain aligned with API sources.
+        citable_sources = select_citable_sources(state.external_context)
         source_index_lines = []
-        apa_references = []
-        for i, r in enumerate(raw_sources):
-            source_index_lines.append(f"[{i + 1}] {r.get('title', '')}— {r['url']}")
-            apa_references.append(format_apa_reference(i + 1, r))
+        references_by_index = {}
+        for source_index_number, source in citable_sources:
+            source_index_lines.append(
+                f"[{source_index_number}] {source.get('title', '')}— {source.get('url', '')}"
+            )
+            references_by_index[source_index_number] = format_apa_reference(
+                source_index_number, source
+            )
 
-        source_index = "\n".join(source_index_lines)
-        apa_ref_block = "\n".join(apa_references)
+        source_index = "\n".join(source_index_lines) or "No citable external sources."
+        apa_ref_block = "\n".join(references_by_index.values())
+        allowed_citations = ", ".join(
+            f"[{source_index_number}]" for source_index_number, _ in citable_sources
+        ) or "None"
 
         # Research notes are LLM-generated and may compress or misstate a
-        # source. Give Writer bounded verbatim evidence so claims can be
-        # checked against the discovered documents instead of model memory.
+        # source. Give Writer citation-bound, verbatim evidence so claims can
+        # be checked against the discovered documents instead of model memory.
         evidence_lines = []
-        for i, source in enumerate(raw_sources[:12]):
+        for source_index_number, source in citable_sources:
             content = (source.get("content") or "").strip()
-            if not content:
-                continue
             evidence_lines.append(
-                f"[{i + 1}] {source.get('title', 'Untitled')}\n"
-                f"Verbatim excerpt: {content[:1200]}"
+                f"[{source_index_number}] {source.get('title', 'Untitled')}\n"
+                f"Citation-bound verbatim excerpt: {content[:1200]}"
             )
-        source_evidence = "\n\n".join(evidence_lines) or "No verbatim external excerpts available."
+        source_evidence = "\n\n".join(evidence_lines) or "No citation-bound external excerpts available."
 
         vector_section = ""
         if state.vector_context:
@@ -75,7 +86,10 @@ Focus Sections: {', '.join(state.focus_sections) or 'All'}
 === Source Index (for inline [N] citations) ===
 {source_index}
 
-=== Verbatim Source Evidence (authoritative for factual claims) ===
+Allowed external citation markers: {allowed_citations}
+Do not use any external [N] marker not listed above.
+
+=== Citation-Bound Source Evidence (authoritative for factual claims) ===
 {source_evidence}
 
 === Pre-formatted APA References (copy verbatim into References section) ===
@@ -86,8 +100,22 @@ Focus Sections: {', '.join(state.focus_sections) or 'All'}
 
         prompt = WRITER_PROMPT.replace("{QUESTION}", question)
         try:
-            res = self.llm.invoke([SystemMessage(content=prompt), HumanMessage(content=context)])
-            state.draft_answer = res.content
+            messages = [SystemMessage(content=prompt), HumanMessage(content=context)]
+            for attempt in range(2):
+                res = self.llm.invoke(messages)
+                draft = str(getattr(res, "content", "") or "").strip()
+                if draft:
+                    state.draft_answer = draft
+                    break
+                if attempt == 0:
+                    log(state, "[WriterAgent] Empty model response; retrying once with the same grounded evidence")
+            else:
+                state.draft_answer = None
+                state.failure_code = "writer_empty_response"
+                state.failure_message = "Writer model returned an empty response after one retry."
+                state.workflow_status = "failed"
+                log(state, "[WriterAgent] FAILED — model returned empty responses")
+                return state
         except AllLLMProvidersFailed as exc:
             log(state, f"[WriterAgent] LLM unavailable, using source-based fallback: {exc}")
             references = apa_ref_block or source_index or "No sources available."
@@ -99,5 +127,9 @@ Focus Sections: {', '.join(state.focus_sections) or 'All'}
                 f"## Key notes\n{notes}\n\n"
                 f"## References\n{references}"
             )
-        log(state, f"\n[WriterAgent] Draft written — iteration {state.iteration_count + 1} ({len(state.draft_answer)} chars)")
+        if state.draft_answer:
+            state.draft_answer = canonicalize_references(
+                state.draft_answer, references_by_index
+            )
+        log(state, f"\n[WriterAgent] Draft written — iteration {state.iteration_count + 1} ({len(state.draft_answer or '')} chars)")
         return state

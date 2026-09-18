@@ -10,8 +10,79 @@ from app.agents.reader import ReaderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.writer import WriterAgent
+from app.core.config import settings
 from app.core.llm import get_safe_llm
 from app.workflows.states import AgentState
+
+
+def _describe_model(llm, agent: str) -> dict:
+    """Return serializable model-routing telemetry for graph state."""
+    usage_snapshot = getattr(llm, "usage_snapshot", None)
+    if callable(usage_snapshot):
+        snapshot = dict(usage_snapshot())
+        snapshot.setdefault("agent", agent)
+        return snapshot
+
+    candidates = getattr(llm, "candidates", None)
+    if isinstance(candidates, list) and candidates:
+        return {
+            "agent": agent,
+            "provider": "OpenRouter",
+            "model": None,
+            "status": "configured",
+            "routing": f"OpenRouter candidates · {len(candidates)} available",
+            "available_models": [str(candidate) for candidate in candidates],
+            "fallback_used": False,
+            "invocations": 0,
+            "attempts": [],
+        }
+
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+    if not isinstance(model, str) or not model.strip():
+        model = getattr(settings, "GROQ_LLM_MODEL", "Configured model")
+    return {
+        "agent": agent,
+        "provider": str(getattr(settings, "AGENT_LLM_PROVIDER", "Configured")).title(),
+        "model": str(model),
+        "selected_provider": None,
+        "selected_model": None,
+        "routing": "Direct provider",
+        "status": "configured",
+        "fallback_used": False,
+        "invocations": 0,
+        "available_models": [],
+        "attempts": [],
+    }
+
+
+def _not_called_model(llm, agent: str) -> dict:
+    """Describe a configured graph model before its node is invoked."""
+    snapshot = _describe_model(llm, agent)
+    snapshot.update(
+        {
+            "status": "not_called",
+            "fallback_used": False,
+            "invocations": 0,
+            "attempts": [],
+        }
+    )
+    return snapshot
+
+
+def _reader_model_usage() -> dict:
+    return {
+        "agent": "reader",
+        "provider": "Internal retrieval",
+        "model": None,
+        "selected_provider": None,
+        "selected_model": None,
+        "status": "not_applicable",
+        "routing": "PGVector context",
+        "fallback_used": False,
+        "invocations": 0,
+        "available_models": [],
+        "attempts": [],
+    }
 
 
 def _review_router(state: AgentState) -> str:
@@ -34,12 +105,17 @@ def _evidence_router(state: AgentState) -> str:
 
 def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], None]] = None):
     """Build the runtime graph; Reader and Researcher execute in one super-step."""
-    planner = PlannerAgent(get_safe_llm("planner"))
-    clarifier = ClarifierAgent(get_safe_llm("clarifier"))
+    planner_llm = get_safe_llm("planner")
+    clarifier_llm = get_safe_llm("clarifier")
+    researcher_llm = get_safe_llm("researcher")
+    writer_llm = get_safe_llm("writer")
+    reviewer_llm = get_safe_llm("reviewer")
+    planner = PlannerAgent(planner_llm)
+    clarifier = ClarifierAgent(clarifier_llm)
     reader = ReaderAgent()
-    researcher = ResearcherAgent(get_safe_llm("researcher"))
-    writer = WriterAgent(get_safe_llm("writer"))
-    reviewer = ReviewerAgent(get_safe_llm("reviewer"))
+    researcher = ResearcherAgent(researcher_llm)
+    writer = WriterAgent(writer_llm)
+    reviewer = ReviewerAgent(reviewer_llm)
 
     def emit(**event):
         if progress_callback is None:
@@ -54,13 +130,25 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
         emit(phase="planning", state="active", agent="planner", title="Planning research", detail="PlannerAgent is analyzing the question and defining the research scope.")
         result = planner.run(state.model_copy(deep=True))
         emit(phase="planning", state="completed", agent="planner", title="Research plan complete", detail="PlannerAgent created web and internal retrieval plans.", metadata={"search_queries": result.search_queries[:5], "focus_sections": result.focus_sections[:10], "need_external_search": True})
-        return result.model_dump()
+        update = result.model_dump()
+        update["model_usage"] = {
+            "planner": _describe_model(planner_llm, "planner"),
+            "clarifier": _not_called_model(clarifier_llm, "clarifier"),
+            "reader": _reader_model_usage(),
+            "researcher": _not_called_model(researcher_llm, "researcher"),
+            "writer": _not_called_model(writer_llm, "writer"),
+            "reviewer": _not_called_model(reviewer_llm, "reviewer"),
+        }
+        return update
 
     def clarifier_node(state: AgentState):
         emit(phase="clarifying", state="active", agent="clarifier", title="Clarifying the research question", detail="ClarifierAgent is standardizing the interpretation before source discovery.")
         result = clarifier.run(state.model_copy(deep=True))
         emit(phase="clarifying", state="completed", agent="clarifier", title="Research question clarified", detail="The question has been normalized for retrieval.")
-        return {"clarified_question": result.clarified_question}
+        return {
+            "clarified_question": result.clarified_question,
+            "model_usage": {"clarifier": _describe_model(clarifier_llm, "clarifier")},
+        }
 
     def prepare_retrieval(state: AgentState):
         question = state.clarified_question or state.question
@@ -84,6 +172,7 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "vector_context": result.vector_context,
             "reader_status": result.reader_status,
             "retrieval_warnings": result.retrieval_warnings,
+            "model_usage": {"reader": _reader_model_usage()},
         }
 
     def researcher_node(state: AgentState):
@@ -94,6 +183,7 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "external_context": result.external_context,
             "researcher_status": result.researcher_status,
             "retrieval_warnings": result.retrieval_warnings,
+            "model_usage": {"researcher": _describe_model(researcher_llm, "researcher")},
         }
 
     def merge_evidence(state: AgentState):
@@ -128,6 +218,8 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "draft_history": draft_history,
             "failure_code": result.failure_code,
             "failure_message": result.failure_message,
+            "model_usage": {"writer": _describe_model(writer_llm, "writer")},
+            "writer_model": _describe_model(writer_llm, "writer"),
         }
 
     def reviewer_node(state: AgentState):
@@ -151,6 +243,7 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "review_decision": result.review_decision,
             "review_history": review_history,
             "failure_code": result.failure_code,
+            "model_usage": {"reviewer": _describe_model(reviewer_llm, "reviewer")},
         }
 
     def accept_node(state: AgentState):

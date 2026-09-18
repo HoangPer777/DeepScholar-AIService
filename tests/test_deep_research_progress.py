@@ -287,6 +287,17 @@ def test_full_workflow_emits_review_rewrite_and_completion():
     assert "rewriting" in phases
     assert phases[-2:] == ["finalizing", "completed"]
     assert result["reviewed_answer"] == "Draft 2"
+    assert set(result["model_usage"]) == {
+        "planner", "clarifier", "reader", "researcher", "writer", "reviewer"
+    }
+    assert result["writer_model"] == result["model_usage"]["writer"]
+
+    response = research._build_response(result, "task-graph-telemetry")
+    assert response["writer_model"] is not None
+    assert response["writer_model"]["agent"] == "writer"
+    assert set(response["model_usage"]) == {
+        "planner", "clarifier", "reader", "researcher", "writer", "reviewer"
+    }
 
     workflow_agent_by_title = {
         event["title"]: event.get("agent")

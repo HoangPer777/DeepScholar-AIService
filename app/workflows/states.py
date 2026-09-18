@@ -4,6 +4,11 @@ from typing import Annotated, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+def _merge_dicts(left: Dict, right: Dict) -> Dict:
+    """Merge parallel LangGraph dictionary updates without mutating inputs."""
+    return {**left, **right}
+
+
 class AgentState(BaseModel):
     question: str
 
@@ -60,6 +65,8 @@ class AgentState(BaseModel):
     # To track agent execution flow
     logs: Annotated[List[str], operator.add] = Field(default_factory=list)
     timings: Annotated[Dict[str, int], operator.ior] = Field(default_factory=dict)
+    model_usage: Annotated[Dict[str, Dict], _merge_dicts] = Field(default_factory=dict)
+    writer_model: Optional[Dict] = None
 
     # NEW: timing metadata for observability (Requirement 8.1)
     # Populated by the workflow routing layer, not the agents themselves

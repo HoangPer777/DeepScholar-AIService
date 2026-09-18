@@ -682,6 +682,26 @@ class TestResearcherAgent:
         urls = [s["url"] for s in real_sources]
         assert len(urls) == len(set(urls)), "Duplicate URLs in external_context"
 
+    def test_parallel_sources_are_balanced_in_original_query_order(self):
+        """Completion order must not let one query monopolize early sources."""
+        import time
+        from app.agents.researcher import _collect_sources_parallel
+
+        def fake_search(query):
+            if query == "query 1":
+                time.sleep(0.02)
+            return [
+                _make_source("arxiv", f"https://example.com/{query[-1]}/a"),
+                _make_source("arxiv", f"https://example.com/{query[-1]}/b"),
+            ]
+
+        with patch("app.agents.researcher.academic_search", side_effect=fake_search):
+            result = _collect_sources_parallel(["query 1", "query 2"])
+
+        assert [source["retrieval_query"] for source in result] == [
+            "query 1", "query 2", "query 1", "query 2"
+        ]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model candidates tests

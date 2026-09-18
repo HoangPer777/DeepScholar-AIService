@@ -80,6 +80,242 @@ def test_quality_rejection_returns_unreviewed_draft_without_failing_job():
     assert result.review_decision == "rewrite"
 
 
+def test_reviewer_rewrites_unsupported_named_identifier_even_if_llm_accepts():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.95,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Looks grounded."
+    }"""
+    state = AgentState(
+        question="How is retrieval used?",
+        draft_answer="ChemPrompt and AgentFact improve retrieval reliability [1].",
+        need_external_search=True,
+        external_context=[
+            {
+                "title": "Retrieval study",
+                "source_type": "arxiv",
+                "url": "https://arxiv.org/abs/1234.5678",
+                "citation_count": 50,
+                "content": "This study evaluates standard retrieval-augmented generation.",
+            }
+        ],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rewrite"
+    assert result.confidence_score == pytest.approx(0.68)
+    assert "ChemPrompt" in result.review_feedback
+    assert "AgentFact" in result.review_feedback
+    reviewer_context = llm.invoke.call_args.args[0][1].content
+    assert "Citation-Bound Evidence" in reviewer_context
+    assert "standard retrieval-augmented generation" in reviewer_context
+
+
+def test_reviewer_accepts_named_identifier_present_in_cited_evidence():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.91,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Grounded."
+    }"""
+    state = AgentState(
+        question="How is retrieval used?",
+        draft_answer=(
+            "ChemPrompt uses retrieved molecular evidence to guide generation [1].\n\n"
+            "## References\n[1] ChemPrompt study."
+        ),
+        need_external_search=True,
+        external_context=[
+            {
+                "title": "ChemPrompt study",
+                "source_type": "arxiv",
+                "url": "https://arxiv.org/abs/1234.5678",
+                "citation_count": 50,
+                "content": "ChemPrompt uses retrieved molecular evidence to guide generation.",
+            }
+        ],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer == state.draft_answer
+    assert result.review_decision == "accept"
+
+
+def test_reviewer_does_not_treat_generic_acronyms_as_named_systems():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.91,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Grounded."
+    }"""
+    state = AgentState(
+        question="How are metadata sources used?",
+        draft_answer=(
+            "DOI and NOAA metadata can support scholarly indexing [1].\n\n"
+            "## References\n[1] Metadata study."
+        ),
+        need_external_search=True,
+        external_context=[
+            {
+                "title": "Metadata study",
+                "source_type": "arxiv",
+                "url": "https://arxiv.org/abs/1234.5678",
+                "citation_count": 50,
+                "content": "This study discusses scholarly indexing metadata.",
+            }
+        ],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer == state.draft_answer
+    assert result.review_decision == "accept"
+
+
+def test_reviewer_skips_llm_when_writer_response_is_empty():
+    llm = MagicMock()
+    state = AgentState(
+        question="How is retrieval used?",
+        draft_answer=None,
+        failure_code="writer_empty_response",
+        failure_message="Writer model returned an empty response after one retry.",
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    llm.invoke.assert_not_called()
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rejected"
+    assert result.confidence_score == 0.0
+    assert result.review_feedback == "Writer model returned an empty response after one retry."
+
+
+def test_reviewer_rewrites_citation_without_citable_evidence():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.9,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Looks grounded."
+    }"""
+    sources = [
+        {
+            "title": f"Source {index}",
+            "source_type": "arxiv",
+            "url": f"https://example.com/{index}",
+            "citation_count": 50,
+            "content": f"Evidence {index}",
+        }
+        for index in range(1, 29)
+    ]
+    state = AgentState(
+        question="How does verification work?",
+        draft_answer="A later source supports this claim [28].\n\n## References\n[28] Source 28.",
+        need_external_search=True,
+        external_context=sources,
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rewrite"
+    assert "citation_without_evidence:[28]" in result.review_feedback
+
+
+def test_reviewer_rewrites_citation_missing_reference_entry():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.9,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Looks grounded."
+    }"""
+    state = AgentState(
+        question="How does verification work?",
+        draft_answer="Verification improves citation traceability [1].",
+        need_external_search=True,
+        external_context=[{
+            "title": "Verification study",
+            "source_type": "arxiv",
+            "url": "https://example.com/verification",
+            "citation_count": 50,
+            "content": "Verification improves citation traceability.",
+        }],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rewrite"
+    assert "citation_missing_reference:[1]" in result.review_feedback
+
+
+def test_reviewer_rewrites_unsupported_percentage_claim():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.9,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Looks grounded."
+    }"""
+    state = AgentState(
+        question="How much does verification improve precision?",
+        draft_answer=(
+            "Verification improves precision by 12% [1].\n\n"
+            "## References\n[1] Verification study."
+        ),
+        need_external_search=True,
+        external_context=[{
+            "title": "Verification study",
+            "source_type": "arxiv",
+            "url": "https://example.com/verification",
+            "citation_count": 50,
+            "content": "Verification improves citation traceability.",
+        }],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rewrite"
+    assert "12%" in result.review_feedback
+
+
+def test_reviewer_accepts_percentage_present_in_cited_evidence():
+    llm = MagicMock()
+    llm.invoke.return_value.content = """{
+        "score": 0.9,
+        "decision": "accept",
+        "failed_criteria": [],
+        "feedback": "Grounded."
+    }"""
+    draft = "Precision improves by 12% [1].\n\n## References\n[1] Verification study."
+    state = AgentState(
+        question="How much does verification improve precision?",
+        draft_answer=draft,
+        need_external_search=True,
+        external_context=[{
+            "title": "Verification study",
+            "source_type": "arxiv",
+            "url": "https://example.com/verification",
+            "citation_count": 50,
+            "content": "The evaluation reports that precision improves by 12%.",
+        }],
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    assert result.reviewed_answer == draft
+    assert result.review_decision == "accept"
+
+
 def test_rejected_draft_is_not_saved_as_fast_chat_context():
     from app.workflows.rag_workflow import _save_research_context
 

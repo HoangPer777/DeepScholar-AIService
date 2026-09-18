@@ -1,6 +1,9 @@
 import re
 import requests
-from typing import Dict, List
+from typing import Dict, List, Tuple
+
+
+MAX_CITABLE_SOURCES = 16
 
 
 def enrich_arxiv_metadata(sources: List[Dict]) -> List[Dict]:
@@ -73,3 +76,38 @@ def format_apa_reference(index: int, source: Dict) -> str:
     else:
         domain = re.sub(r"https?://(www\.)?", "", url).split("/")[0]
         return f"[{index}] {title}. ({year}). {domain}. Retrieved from {url}"
+
+
+def select_citable_sources(
+    sources: List[Dict],
+    limit: int = MAX_CITABLE_SOURCES,
+) -> List[Tuple[int, Dict]]:
+    """Return a bounded, evidence-bearing source set with stable public indexes."""
+    selected: List[Tuple[int, Dict]] = []
+    real_index = 0
+    for source in sources:
+        if source.get("title") == "__research_notes__":
+            continue
+        real_index += 1
+        if not (source.get("content") or "").strip():
+            continue
+        selected.append((real_index, source))
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def split_reference_section(draft: str) -> Tuple[str, str]:
+    """Split a Markdown draft into body and References content."""
+    parts = re.split(r"(?im)^\s*#+\s*references\s*$", draft or "", maxsplit=1)
+    return parts[0].rstrip(), parts[1].strip() if len(parts) == 2 else ""
+
+
+def canonicalize_references(draft: str, references: Dict[int, str]) -> str:
+    """Replace model-written references with canonical entries for cited sources."""
+    body, _ = split_reference_section(draft)
+    cited = sorted({int(marker) for marker in re.findall(r"\[(\d+)\]", body)})
+    entries = [references[index] for index in cited if index in references]
+    if not entries:
+        return body
+    return f"{body}\n\n## References\n" + "\n".join(entries)

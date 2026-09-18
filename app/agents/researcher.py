@@ -112,8 +112,7 @@ def _collect_sources_parallel(
         )
     capped = queries[:MAX_QUERIES]
 
-    all_results: List[dict] = []
-    seen_urls: set = set()
+    results_by_query: dict[str, List[dict]] = {}
     lock = threading.Lock()
 
     def fetch_one(q: str) -> List[dict]:
@@ -130,13 +129,7 @@ def _collect_sources_parallel(
                 results = future.result()
                 duration_ms = int((time.perf_counter() - query_started[query]) * 1000)
                 with lock:
-                    for r in results:
-                        url = r.get("url") or ""
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            all_results.append(r)
-                        elif not url:
-                            all_results.append(r)
+                    results_by_query[query] = results
                 _emit_progress(
                     progress_callback,
                     {
@@ -190,6 +183,25 @@ def _collect_sources_parallel(
                         },
                     },
                 )
+    # Futures complete nondeterministically. Interleave results in the original
+    # query order so one fast query cannot monopolize the citable-source window.
+    all_results: List[dict] = []
+    seen_urls: set = set()
+    max_results = max((len(results_by_query.get(query, [])) for query in capped), default=0)
+    for result_index in range(max_results):
+        for query_index, query in enumerate(capped):
+            query_results = results_by_query.get(query, [])
+            if result_index >= len(query_results):
+                continue
+            source = dict(query_results[result_index])
+            url = source.get("url") or ""
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            source["retrieval_query_index"] = query_index
+            source["retrieval_query"] = query
+            all_results.append(source)
     return all_results
 
 

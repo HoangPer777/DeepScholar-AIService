@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.core.safe_llm import AllLLMProvidersFailed
 from app.core.utils import effective_question, log, safe_json
 from app.prompts.reviewer_prompt import REVIEWER_PROMPT
+from app.tools.citation import select_citable_sources, split_reference_section
 from app.tools.source_filter import LOW_QUALITY_DOMAINS
 from app.workflows.states import AgentState
 
@@ -115,16 +116,103 @@ def _build_source_summary(sources: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def _citation_failures(draft: str, source_count: int) -> List[str]:
-    """Reject citation markers that cannot map to the external source index."""
-    if not draft or source_count == 0:
+def _citation_failures(draft: str, sources: List[Dict]) -> List[str]:
+    """Reject citations without a source excerpt or canonical reference entry."""
+    if not draft:
         return []
+    real_sources = [source for source in sources if source.get("title") != "__research_notes__"]
+    citable_indexes = {index for index, _ in select_citable_sources(sources)}
+    body, references = split_reference_section(draft)
+    body_markers = {int(marker) for marker in re.findall(r"\[(\d+)\]", body)}
+    reference_markers = {int(marker) for marker in re.findall(r"(?m)^\s*\[(\d+)\]", references)}
     failures = []
-    for marker in re.findall(r"\[(\d+)\]", draft):
-        if int(marker) > source_count:
+    for marker in sorted(body_markers):
+        if marker > len(real_sources):
             failures.append("citation_out_of_range")
-            break
+        elif marker not in citable_indexes:
+            failures.append(f"citation_without_evidence:[{marker}]")
+        elif marker not in reference_markers:
+            failures.append(f"citation_missing_reference:[{marker}]")
     return failures
+
+
+_HIGH_SPECIFICITY_IDENTIFIER = re.compile(
+    r"\b(?:[A-Z][a-z]+(?:[A-Z][A-Za-z0-9]*)+|"
+    r"[a-z]+(?:-[a-z]+)+\s+(?:framework|system|agent|model|method))\b"
+)
+
+
+def _citation_bound_evidence(sources: List[Dict]) -> str:
+    """Return bounded excerpts indexed exactly like external citations."""
+    excerpts = []
+    for index, source in select_citable_sources(sources):
+        content = (source.get("content") or "").strip()
+        excerpts.append(
+            f"[{index}] {source.get('title', 'Untitled')}\n"
+            f"Verbatim excerpt: {content[:1200]}"
+        )
+    return "\n\n".join(excerpts) or "No verbatim external excerpts available."
+
+
+def _unsupported_cited_identifiers(draft: str, sources: List[Dict]) -> List[str]:
+    """Find specific named terms cited to sources whose excerpts do not contain them.
+
+    The check is intentionally limited to CamelCase system names and hyphenated
+    named frameworks. Acronyms require semantic context and remain an LLM
+    reviewer responsibility. This is a guardrail, not an entailment engine.
+    """
+    if not draft:
+        return []
+
+    citable_sources = dict(select_citable_sources(sources))
+    body, _ = split_reference_section(draft)
+    failures = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
+        markers = {int(marker) for marker in re.findall(r"\[(\d+)\]", sentence)}
+        if not markers:
+            continue
+        identifiers = {
+            match.group(0)
+            for match in _HIGH_SPECIFICITY_IDENTIFIER.finditer(sentence)
+        }
+        for identifier in identifiers:
+            if all(
+                marker not in citable_sources
+                or identifier.casefold() not in (citable_sources[marker].get("content") or "").casefold()
+                for marker in markers
+            ):
+                failures.append(f"hallucination: unsupported identifier '{identifier}'")
+    return list(dict.fromkeys(failures))
+
+
+_QUANTITATIVE_CLAIM = re.compile(
+    r"\b\d+(?:\.\d+)?\s*%|\b\d+\.\d+\b|\b[A-Za-z][A-Za-z0-9_-]*@\d+\b"
+)
+
+
+def _unsupported_quantitative_claims(draft: str, sources: List[Dict]) -> List[str]:
+    """Find cited percentages, decimals, and named metrics absent from evidence."""
+    if not draft:
+        return []
+    citable_sources = dict(select_citable_sources(sources))
+    body, _ = split_reference_section(draft)
+    failures = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
+        markers = {int(marker) for marker in re.findall(r"\[(\d+)\]", sentence)}
+        if not markers:
+            continue
+        claims = {match.group(0) for match in _QUANTITATIVE_CLAIM.finditer(sentence)}
+        for claim in claims:
+            normalized_claim = re.sub(r"\s+", "", claim).casefold()
+            if all(
+                marker not in citable_sources
+                or normalized_claim not in re.sub(
+                    r"\s+", "", citable_sources[marker].get("content") or ""
+                ).casefold()
+                for marker in markers
+            ):
+                failures.append(f"hallucination: unsupported quantitative claim '{claim}'")
+    return list(dict.fromkeys(failures))
 
 
 class ReviewerAgent:
@@ -132,6 +220,14 @@ class ReviewerAgent:
         self.llm = llm
 
     def run(self, state: AgentState) -> AgentState:
+        if state.failure_code == "writer_empty_response":
+            state.reviewed_answer = None
+            state.review_decision = "rejected"
+            state.confidence_score = 0.0
+            state.review_feedback = state.failure_message or "Writer model returned an empty response."
+            log(state, "[ReviewerAgent] SKIPPED — writer returned an empty response")
+            return state
+
         # V13: Run source quality gate before LLM evaluation
         gate_passed, gate_failed = _source_quality_gate(
             state.external_context,
@@ -148,7 +244,22 @@ class ReviewerAgent:
         log(state, f"\n[ReviewerAgent] Source quality: {academic_count}/{total_count} academic (ratio={academic_ratio:.2f})")
         if gate_failed:
             log(state, f"  [ReviewerAgent] Gate failed: {gate_failed}")
-        for failure in _citation_failures(state.draft_answer or "", total_count):
+        citation_failures = _citation_failures(
+            state.draft_answer or "", state.external_context
+        )
+        for failure in citation_failures:
+            if failure not in gate_failed:
+                gate_failed.append(failure)
+        unsupported_identifiers = _unsupported_cited_identifiers(
+            state.draft_answer or "", state.external_context
+        )
+        for failure in unsupported_identifiers:
+            if failure not in gate_failed:
+                gate_failed.append(failure)
+        unsupported_quantitative_claims = _unsupported_quantitative_claims(
+            state.draft_answer or "", state.external_context
+        )
+        for failure in unsupported_quantitative_claims:
             if failure not in gate_failed:
                 gate_failed.append(failure)
 
@@ -160,10 +271,12 @@ class ReviewerAgent:
             log(state, f"\n[ReviewerAgent] Iteration {state.iteration_count} — REWRITE (no sources)")
             return state
 
-        # V13: Include source list in LLM input for quality-aware evaluation
+        # Include citation-bound evidence so the reviewer can verify named
+        # systems, methods, metrics, and citations against source text.
         source_summary = _build_source_summary(state.external_context)
+        source_evidence = _citation_bound_evidence(state.external_context)
         if state.vector_context:
-            source_summary += "\n\n=== Internal PDF evidence ===\n" + "\n".join(
+            source_evidence += "\n\n=== Internal PDF evidence ===\n" + "\n".join(
                 f"[PDF-{index + 1}] {chunk.get('section', '?')}: {chunk.get('content', '')[:300]}"
                 for index, chunk in enumerate(state.vector_context)
             )
@@ -174,6 +287,7 @@ class ReviewerAgent:
                 HumanMessage(content=(
                     f"Research Question: {effective_question(state)}\n\n"
                     f"=== Sources Used ===\n{source_summary}\n\n"
+                    f"=== Citation-Bound Evidence ===\n{source_evidence}\n\n"
                     f"=== Draft ===\n{state.draft_answer}"
                 )),
             ])
@@ -207,6 +321,28 @@ class ReviewerAgent:
         for gf in gate_failed:
             if gf not in failed:
                 failed.append(gf)
+        if citation_failures:
+            feedback = (
+                f"{feedback}\n\nFix citation mapping: "
+                f"{', '.join(citation_failures[:3])}. Use only markers that have both "
+                f"citation-bound evidence and a canonical reference entry."
+            )
+        if unsupported_identifiers:
+            unsupported_names = ", ".join(
+                failure.split("'")[1] for failure in unsupported_identifiers[:3]
+            )
+            feedback = (
+                f"{feedback}\n\nRemove {unsupported_names} unless the exact identifier "
+                f"appears in the citation-bound evidence for its inline citation."
+            )
+        if unsupported_quantitative_claims:
+            unsupported_values = ", ".join(
+                failure.split("'")[1] for failure in unsupported_quantitative_claims[:3]
+            )
+            feedback = (
+                f"{feedback}\n\nRemove or correct {unsupported_values}; each quantitative "
+                f"value must appear in the evidence for its inline citation."
+            )
 
         # V13: Cap score if academic_ratio < 0.3
         if academic_ratio < 0.3 and score > _LOW_ACADEMIC_SCORE_CAP:

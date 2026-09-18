@@ -6,6 +6,9 @@ STRICT RULES:
 - Use ONLY information from the provided sources. Do NOT add outside knowledge or synthesize beyond what sources say.
 - Treat Research Notes as a navigation aid, not as authoritative evidence. Verify every method name, acronym, author, year, metric, and comparison against the verbatim Source Evidence excerpts.
 - Never invent or expand an acronym, method name, architecture, benchmark, or result from a vague note. If the exact evidence is not present in the excerpts, omit the claim.
+- A citation [N] supports only the numbered Citation-Bound Source Evidence block [N]. A named system, framework, agent, acronym, method, or benchmark may appear only when its exact identifier appears in that block.
+- Use ONLY the external citation markers explicitly listed as allowed in the context. Never copy a citation marker from Research Notes if it is not in that allowed list.
+- Every percentage, decimal result, and named metric (for example Precision@5) must appear verbatim in the evidence block cited by that sentence.
 - GROUNDING: Every factual claim, statistic, benchmark result, or specific finding MUST have its own inline citation [N] placed IMMEDIATELY after that claim.
 - Do NOT group multiple claims under one citation at the end of a paragraph.
 - Do NOT write a claim if you cannot cite it from the source list. Write "Evidence not found in sources" instead.
@@ -39,7 +42,7 @@ Trade-offs, limitations, failure cases [N]. Do NOT repeat Results.
 Future directions and practical implications. Do NOT repeat Discussion.
 
 ## References
-Copy pre-formatted APA references exactly — do not reformat.
+Do not invent references. The application will replace this section with canonical entries for the external citations actually used.
 
 TARGET LENGTH: 1500-2500 words
 
@@ -50,4 +53,5 @@ QUALITY CHECKS:
 - Methodology in prose (no bullets)?
 - At least one A vs B comparison in Results?
 - No hallucinated facts?
+- Does every named system/framework/agent/acronym appear verbatim in its cited evidence block?
 """

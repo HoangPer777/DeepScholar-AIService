@@ -18,6 +18,16 @@ class CapturingLLM:
         return SimpleNamespace(content="Answer with [PDF-1].")
 
 
+class SequencedLLM:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.call_count = 0
+
+    def invoke(self, _messages):
+        self.call_count += 1
+        return SimpleNamespace(content=next(self.responses))
+
+
 def test_chatbot_reader_retrieves_chunks_by_article_id(monkeypatch):
     def fake_search(article_id, question, focus_sections, limit, timings):
         assert article_id == 77
@@ -67,6 +77,7 @@ def test_chatbot_writer_receives_pdf_context_with_section_citation():
 
     assert "[PDF-1] Section: results" in human_context
     assert "Precision@5 of 0.78" in human_context
+    assert "Citation-Bound Source Evidence" in human_context
     assert result.draft_answer == "Answer with [PDF-1]."
 
 
@@ -78,6 +89,62 @@ def test_chatbot_writer_does_not_crash_without_vector_context():
 
     assert result.draft_answer == "Answer with [PDF-1]."
     assert "PDF / Vector Context" not in llm.messages[1].content
+
+
+def test_writer_retries_once_when_model_returns_empty_content():
+    llm = SequencedLLM(["   ", "Grounded answer [1]."])
+    state = AgentState(
+        question="Summarize the evidence",
+        external_context=[{
+            "title": "Evidence",
+            "url": "https://example.com/evidence",
+            "content": "Grounded evidence.",
+        }],
+    )
+
+    result = WriterAgent(llm).run(state)
+
+    assert llm.call_count == 2
+    assert result.draft_answer.startswith("Grounded answer [1].\n\n## References\n[1]")
+    assert result.failure_code is None
+
+
+def test_writer_replaces_model_references_with_canonical_cited_entries():
+    llm = SequencedLLM([
+        "Grounded evidence [1].\n\n## References\n[99] Invented reference."
+    ])
+    state = AgentState(
+        question="Summarize the evidence",
+        external_context=[{
+            "title": "Canonical Evidence",
+            "url": "https://example.com/evidence",
+            "content": "Grounded evidence.",
+        }],
+    )
+
+    result = WriterAgent(llm).run(state)
+
+    assert "[1] Canonical Evidence." in result.draft_answer
+    assert "[99]" not in result.draft_answer
+
+
+def test_writer_marks_failure_after_two_empty_model_responses():
+    llm = SequencedLLM(["", "   "])
+    state = AgentState(
+        question="Summarize the evidence",
+        external_context=[{
+            "title": "Evidence",
+            "url": "https://example.com/evidence",
+            "content": "Grounded evidence.",
+        }],
+    )
+
+    result = WriterAgent(llm).run(state)
+
+    assert llm.call_count == 2
+    assert result.draft_answer is None
+    assert result.failure_code == "writer_empty_response"
+    assert result.workflow_status == "failed"
 
 
 def test_chatbot_result_question_can_use_table_chunk(monkeypatch):
