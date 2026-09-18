@@ -616,8 +616,8 @@ def test_review_router_accepts_high_confidence(
     max_iterations: int,
 ) -> None:
     """
-    For any AgentState with confidence_score >= 0.7, _review_router returns
-    END regardless of iteration_count or max_iterations.
+    A high score alone is not enough: the reviewer must provide a reviewed
+    answer before the graph can release a report.
 
     Validates: Requirements 1.5
     """
@@ -627,13 +627,13 @@ def test_review_router_accepts_high_confidence(
 
     state = AgentState(
         question="test",
-        reviewed_answer=None,
+        reviewed_answer="Verified answer",
         confidence_score=confidence_score,
         iteration_count=iteration_count,
         max_iterations=max_iterations,
     )
 
-    assert _review_router(state) == END
+    assert _review_router(state) == "accept"
 
 
 # ── Property 4: Research Context Round-Trip ───────────────────────────────────

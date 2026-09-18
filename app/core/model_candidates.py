@@ -7,7 +7,7 @@ model is rate-limited or unavailable.
 """
 
 _STRONG_FREE_MODELS = [
-    "deepseek/deepseek-v3.2",
+    # "deepseek/deepseek-v3.2",
     "openai/gpt-oss-120b",
     "minimax/minimax-m3:free",
 

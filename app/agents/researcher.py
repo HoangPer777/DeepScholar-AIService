@@ -202,28 +202,16 @@ class ResearcherAgent:
         state: AgentState,
         progress_callback: Optional[Callable[[dict], None]] = None,
     ) -> AgentState:
-        if not state.need_external_search:
-            log(state, "\n[ResearcherAgent] SKIPPED")
-            _emit_progress(
-                progress_callback,
-                {
-                    "phase": "synthesizing",
-                    "state": "skipped",
-                    "title": "No external source synthesis needed",
-                    "detail": "The pipeline is continuing with the available context.",
-                },
-            )
-            return state
+        state.need_external_search = True
 
         # Deduplicate queries
-        original_count = len(state.search_queries)
-        deduped_queries = _deduplicate_queries(state.search_queries)
+        original_count = len(state.web_search_queries or state.search_queries)
+        deduped_queries = _deduplicate_queries(state.web_search_queries or state.search_queries)
         if len(deduped_queries) < original_count:
             log(state, f"[ResearcherAgent] Queries: {original_count} → {len(deduped_queries)} after dedup")
 
         if not deduped_queries:
-            log(state, "[ResearcherAgent] WARNING: no queries after dedup — skipping")
-            return state
+            deduped_queries = [effective_question(state)]
 
         # Initial fetch (parallel)
         t0 = time.perf_counter()
@@ -279,6 +267,7 @@ class ResearcherAgent:
             )
 
         state.external_context = all_results
+        state.researcher_status = "completed"
 
         # Build numbered input for researcher LLM
         numbered = "\n\n".join(

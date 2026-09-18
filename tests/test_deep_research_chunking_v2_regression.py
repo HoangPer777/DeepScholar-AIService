@@ -3,14 +3,15 @@ import os
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("INTERNAL_SERVICE_KEY", "test-key")
 
-from app.workflows import rag_workflow
+from app.graph import build_graph as graph_module
+from app.workflows.states import AgentState
 
 
 class FakePlanner:
     def __init__(self, *_args, **_kwargs):
         pass
 
-    def run(self, state):
+    def run(self, state, progress_callback=None):
         state.focus_sections = ["methodology", "results"]
         state.search_queries = ["structure aware chunking"]
         return state
@@ -28,7 +29,7 @@ class FakeResearcher:
     def __init__(self, *_args, **_kwargs):
         pass
 
-    def run(self, state):
+    def run(self, state, progress_callback=None):
         state.external_context = [
             {"title": "__research_notes__", "content": "Research notes"},
             {"title": "External source", "url": "https://example.com", "content": "External context"},
@@ -86,19 +87,15 @@ class FakeReviewer:
 
 
 def test_deep_research_multi_agent_flow_preserves_chunking_v2_context(monkeypatch):
-    monkeypatch.setattr(rag_workflow, "PlannerAgent", FakePlanner)
-    monkeypatch.setattr(rag_workflow, "ClarifierAgent", FakeClarifier)
-    monkeypatch.setattr(rag_workflow, "ResearcherAgent", FakeResearcher)
-    monkeypatch.setattr(rag_workflow, "ReaderAgent", FakeReader)
-    monkeypatch.setattr(rag_workflow, "WriterAgent", FakeWriter)
-    monkeypatch.setattr(rag_workflow, "ReviewerAgent", FakeReviewer)
-    monkeypatch.setattr(rag_workflow, "get_safe_llm", lambda _role: None)
+    monkeypatch.setattr(graph_module, "PlannerAgent", FakePlanner)
+    monkeypatch.setattr(graph_module, "ClarifierAgent", FakeClarifier)
+    monkeypatch.setattr(graph_module, "ResearcherAgent", FakeResearcher)
+    monkeypatch.setattr(graph_module, "ReaderAgent", FakeReader)
+    monkeypatch.setattr(graph_module, "WriterAgent", FakeWriter)
+    monkeypatch.setattr(graph_module, "ReviewerAgent", FakeReviewer)
+    monkeypatch.setattr(graph_module, "get_safe_llm", lambda _role: None)
 
-    result = rag_workflow.run_chat_workflow(
-        question="Compare method and results",
-        article_id=123,
-        session_id=None,
-    )
+    result = graph_module.build_graph().invoke(AgentState(question="Compare method and results", article_id=123))
 
     assert result["focus_sections"] == ["methodology", "results"]
     assert result["vector_context"][0]["section"] == "methodology"

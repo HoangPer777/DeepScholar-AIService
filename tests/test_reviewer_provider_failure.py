@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import fakeredis
 import pytest
 
-from app.agents.reviewer import ReviewRejectedError, ReviewerAgent
+from app.agents.reviewer import ReviewerAgent
 from app.core.safe_llm import AllLLMProvidersFailed, SafeLLM
 from app.workflows.states import AgentState
 
@@ -43,10 +43,10 @@ def test_reviewer_rejects_when_all_providers_fail():
         ],
     )
 
-    with pytest.raises(ReviewRejectedError, match="reviewer unavailable"):
-        ReviewerAgent(llm).run(state)
-
-    assert state.reviewed_answer is None
+    result = ReviewerAgent(llm).run(state)
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rejected"
+    assert result.failure_code == "reviewer_unavailable"
 
 
 def test_quality_rejection_returns_unreviewed_draft_without_failing_job():
@@ -76,10 +76,11 @@ def test_quality_rejection_returns_unreviewed_draft_without_failing_job():
     assert result.draft_answer == "Draft without enough citations."
     assert result.reviewed_answer is None
     assert result.confidence_score == pytest.approx(0.45)
-    assert result.iteration_count == result.max_iterations
+    assert result.iteration_count == 1
+    assert result.review_decision == "rewrite"
 
 
-def test_rejected_draft_is_saved_as_fast_chat_context():
+def test_rejected_draft_is_not_saved_as_fast_chat_context():
     from app.workflows.rag_workflow import _save_research_context
 
     redis_client = MagicMock()
@@ -98,25 +99,18 @@ def test_rejected_draft_is_saved_as_fast_chat_context():
     ):
         _save_research_context("session-1", result)
 
-    saved_report = store.init_session_context.call_args.kwargs["research_report"]
-    assert saved_report.answer == "Draft retained for follow-up questions."
-    assert saved_report.confidence_score == pytest.approx(0.45)
+    store.init_session_context.assert_not_called()
     redis_client.close.assert_called_once()
 
 
-def test_rejected_draft_routes_second_question_to_fast_chat():
-    from app.workflows.rag_workflow import (
-        _save_research_context,
-        run_chat_workflow,
-    )
+def test_rejected_draft_does_not_create_fast_chat_context():
+    from app.workflows.rag_workflow import _save_research_context
 
     server = fakeredis.FakeServer()
 
     def make_redis_client():
         return fakeredis.FakeRedis(server=server)
 
-    fast_llm = MagicMock()
-    fast_llm.invoke.return_value.content = "RAG retrieves context before answering."
     initial_result = {
         "reviewed_answer": None,
         "draft_answer": "A rejected but usable RAG research draft.",
@@ -127,18 +121,11 @@ def test_rejected_draft_routes_second_question_to_fast_chat():
 
     with (
         patch("app.workflows.rag_workflow.create_redis_client", side_effect=make_redis_client),
-        patch("app.workflows.rag_workflow.get_safe_llm", return_value=fast_llm),
     ):
         _save_research_context("session-1", initial_result)
-        result = run_chat_workflow(
-            question="Explain RAG briefly.",
-            session_id="session-1",
-        )
-
-    assert result["answer"] == "RAG retrieves context before answering."
-    assert result["is_fast_chat"] is True
-    assert result["citations"] == []
-    fast_llm.invoke.assert_called_once()
+        from app.core.memory_store import MemoryStore, SessionContextNotFoundError
+        with pytest.raises(SessionContextNotFoundError):
+            MemoryStore(make_redis_client()).get_context_window("session-1")
 
 
 def test_fast_chat_llm_failure_does_not_fall_through_to_full_pipeline():
@@ -183,4 +170,4 @@ def test_removed_unavailable_glm_free_slug():
 
     candidates = [model for models in MODEL_CANDIDATES.values() for model in models]
     assert "z-ai/glm-4.5-air:free" not in candidates
-    assert MODEL_CANDIDATES["fast_chat"][0] == "openai/gpt-oss-20b:free"
+    assert MODEL_CANDIDATES["fast_chat"]

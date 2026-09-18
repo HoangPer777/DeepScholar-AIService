@@ -12,6 +12,14 @@ class WriterAgent:
         self.llm = llm
 
     def run(self, state: AgentState) -> AgentState:
+        raw_sources = [r for r in state.external_context if r.get("title") != "__research_notes__"]
+        if state.workflow_status == "evidence_ready" and not raw_sources and not state.vector_context:
+            state.failure_code = "insufficient_grounded_evidence"
+            state.failure_message = "No internal or external evidence was available for a grounded report."
+            state.workflow_status = "failed"
+            state.draft_answer = None
+            log(state, "[WriterAgent] SKIPPED — no grounded evidence")
+            return state
         # Extract research notes from external_context
         notes = next(
             (r["content"] for r in state.external_context if r.get("title") == "__research_notes__"),
@@ -19,7 +27,6 @@ class WriterAgent:
         )
 
         # Build source index — exclude the internal research_notes entry
-        raw_sources = [r for r in state.external_context if r.get("title") != "__research_notes__"]
         source_index_lines = []
         apa_references = []
         for i, r in enumerate(raw_sources):
@@ -28,6 +35,20 @@ class WriterAgent:
 
         source_index = "\n".join(source_index_lines)
         apa_ref_block = "\n".join(apa_references)
+
+        # Research notes are LLM-generated and may compress or misstate a
+        # source. Give Writer bounded verbatim evidence so claims can be
+        # checked against the discovered documents instead of model memory.
+        evidence_lines = []
+        for i, source in enumerate(raw_sources[:12]):
+            content = (source.get("content") or "").strip()
+            if not content:
+                continue
+            evidence_lines.append(
+                f"[{i + 1}] {source.get('title', 'Untitled')}\n"
+                f"Verbatim excerpt: {content[:1200]}"
+            )
+        source_evidence = "\n\n".join(evidence_lines) or "No verbatim external excerpts available."
 
         vector_section = ""
         if state.vector_context:
@@ -53,6 +74,9 @@ Focus Sections: {', '.join(state.focus_sections) or 'All'}
 
 === Source Index (for inline [N] citations) ===
 {source_index}
+
+=== Verbatim Source Evidence (authoritative for factual claims) ===
+{source_evidence}
 
 === Pre-formatted APA References (copy verbatim into References section) ===
 {apa_ref_block}

@@ -483,7 +483,9 @@ class TestSafeLLM:
         usage = llm.usage_snapshot()
         assert usage["selected_model"] == "llama-3.1-8b-instant"
         assert usage["selected_provider"] == "Groq"
-        assert usage["fallback_used"] is True
+        # Groq is selected directly when OpenRouter is not configured, so this
+        # is a primary provider selection rather than a failed-provider fallback.
+        assert usage["fallback_used"] is False
 
     def test_returns_first_successful_model(self):
         """Trả về kết quả từ model đầu tiên thành công."""
@@ -637,8 +639,8 @@ class TestResearcherAgent:
         assert result.external_context[0]["title"] == "__research_notes__"
         assert result.external_context[0]["content"] == "Research synthesis notes"
 
-    def test_skips_when_no_external_search_needed(self):
-        """ResearcherAgent skips khi need_external_search=False."""
+    def test_searches_when_legacy_state_disables_external_search(self):
+        """Deep Research overrides legacy skip flags and still gathers evidence."""
         from app.agents.researcher import ResearcherAgent
         from app.workflows.states import AgentState
 
@@ -649,11 +651,11 @@ class TestResearcherAgent:
             need_external_search=False,
         )
 
-        with patch("app.agents.researcher.academic_search") as mock_search:
+        with patch("app.agents.researcher.academic_search", return_value=[] ) as mock_search:
             result = agent.run(state)
-            mock_search.assert_not_called()
+            assert mock_search.called
 
-        assert result.external_context == []
+        assert result.researcher_status == "completed"
 
     def test_deduplicates_across_queries(self):
         """Không có duplicate URLs khi nhiều queries trả về cùng source."""

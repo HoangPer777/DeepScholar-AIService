@@ -7,7 +7,8 @@ V13 changes:
 - Score capped at 0.60 when academic_ratio < 0.3
 - Source list included in LLM input for quality-aware evaluation
 """
-from typing import Dict, List, Tuple 
+import re
+from typing import Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -32,6 +33,7 @@ class ReviewRejectedError(RuntimeError):
 def _source_quality_gate(
     sources: List[Dict],
     need_external_search: bool,
+    internal_context: List[Dict] | None = None,
 ) -> Tuple[bool, List[str]]:
     """
     Kiểm tra source quality trước khi LLM evaluation.
@@ -67,6 +69,8 @@ def _source_quality_gate(
     total = len(real_sources)
 
     if total == 0:
+        if internal_context:
+            return True, []
         # No sources at all when external search was needed — critical failure
         return False, ["no_sources_found"]
 
@@ -111,6 +115,18 @@ def _build_source_summary(sources: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def _citation_failures(draft: str, source_count: int) -> List[str]:
+    """Reject citation markers that cannot map to the external source index."""
+    if not draft or source_count == 0:
+        return []
+    failures = []
+    for marker in re.findall(r"\[(\d+)\]", draft):
+        if int(marker) > source_count:
+            failures.append("citation_out_of_range")
+            break
+    return failures
+
+
 class ReviewerAgent:
     def __init__(self, llm):
         self.llm = llm
@@ -120,6 +136,7 @@ class ReviewerAgent:
         gate_passed, gate_failed = _source_quality_gate(
             state.external_context,
             state.need_external_search,
+            state.vector_context,
         )
 
         # Compute metrics for logging
@@ -131,6 +148,9 @@ class ReviewerAgent:
         log(state, f"\n[ReviewerAgent] Source quality: {academic_count}/{total_count} academic (ratio={academic_ratio:.2f})")
         if gate_failed:
             log(state, f"  [ReviewerAgent] Gate failed: {gate_failed}")
+        for failure in _citation_failures(state.draft_answer or "", total_count):
+            if failure not in gate_failed:
+                gate_failed.append(failure)
 
         # Critical: no sources at all when external search was needed
         if "no_sources_found" in gate_failed and state.need_external_search:
@@ -142,6 +162,11 @@ class ReviewerAgent:
 
         # V13: Include source list in LLM input for quality-aware evaluation
         source_summary = _build_source_summary(state.external_context)
+        if state.vector_context:
+            source_summary += "\n\n=== Internal PDF evidence ===\n" + "\n".join(
+                f"[PDF-{index + 1}] {chunk.get('section', '?')}: {chunk.get('content', '')[:300]}"
+                for index, chunk in enumerate(state.vector_context)
+            )
 
         try:
             res = self.llm.invoke([
@@ -153,10 +178,12 @@ class ReviewerAgent:
                 )),
             ])
         except AllLLMProvidersFailed as exc:
-            log(state, f"  [WARN] Reviewer unavailable, returning draft without automated review: {exc}")
-            state.reviewed_answer = state.draft_answer
-            state.confidence_score = 0.5
-            state.review_feedback = "Automated reviewer unavailable; draft returned without review."
+            log(state, f"  [WARN] Reviewer unavailable; report is rejected: {exc}")
+            state.reviewed_answer = None
+            state.confidence_score = 0.0
+            state.review_decision = "rejected"
+            state.failure_code = "reviewer_unavailable"
+            state.review_feedback = "Automated reviewer unavailable; report was not released."
             state.iteration_count += 1
             return state
 
@@ -209,8 +236,10 @@ class ReviewerAgent:
 
         if decision == "accept" and state.confidence_score >= 0.7:
             state.reviewed_answer = state.draft_answer
+            state.review_decision = "accept"
             log(state, "  -> ACCEPTED")
         else:
+            state.review_decision = "rewrite" if state.iteration_count < state.max_iterations else "rejected"
             log(state, f"  -> REWRITE ({state.iteration_count}/{state.max_iterations})")
             if state.iteration_count >= state.max_iterations:
                 log(state, "  -> REJECTED — draft remains unreviewed")

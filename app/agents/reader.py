@@ -9,12 +9,13 @@ class ReaderAgent:
     def run(self, state: AgentState) -> AgentState:
         if not state.article_id:
             log(state, "\n[ReaderAgent] No article_id — skipping vector search")
+            state.reader_status = "skipped"
             return state
 
         try:
             chunks = search_article_chunks(
                 article_id=state.article_id,
-                question=effective_question(state),
+                question=(state.db_search_queries or [effective_question(state)])[0],
                 focus_sections=state.focus_sections,
                 limit=8,
                 timings=state.timings,
@@ -35,7 +36,10 @@ class ReaderAgent:
                 for c in chunks
             ]
             log(state, f"\n[ReaderAgent] Retrieved {len(chunks)} chunks from PGVector")
+            state.reader_status = "completed"
         except Exception as e:
             log(state, f"\n[ReaderAgent] WARNING: vector search failed ({e}) — continuing without PDF context")
             state.vector_context = []
+            state.reader_status = "failed"
+            state.retrieval_warnings.append("Internal document retrieval failed.")
         return state
