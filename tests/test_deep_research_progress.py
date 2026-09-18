@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from app.api import research
+from app.graph import build_graph as graph_module
 from app.workflows import rag_workflow
 
 
@@ -52,6 +53,43 @@ def test_build_response_exposes_writer_model_metadata():
     assert response["writer_model"]["model"] == "openai/gpt-oss-20b:free"
     assert response["writer_model"]["attempts"][0]["duration_ms"] == 42
     assert response["model_usage"]["writer"]["model"] == "openai/gpt-oss-20b:free"
+
+
+def test_build_response_exposes_bounded_agent_outputs():
+    response = research._build_response(
+        {
+            "draft_history": [{"iteration": 1, "content": "draft body"}],
+            "review_history": [{
+                "iteration": 1,
+                "score": 0.65,
+                "decision": "rewrite",
+                "feedback": "Tighten the discussion.",
+            }],
+        },
+        "task-agent-outputs",
+    )
+
+    assert response["agent_outputs"]["drafts"] == [{
+        "iteration": 1,
+        "content": "draft body",
+        "truncated": False,
+    }]
+    assert response["agent_outputs"]["reviews"][0]["decision"] == "rewrite"
+
+
+def test_agent_outputs_are_bounded_for_job_storage_and_response():
+    outputs = research._build_agent_outputs(
+        {
+            "draft_history": [{"iteration": 1, "content": "x" * 20_001}],
+            "review_history": [{"iteration": 1, "score": 2, "decision": "unknown", "feedback": "y" * 5_001}],
+        }
+    )
+
+    assert len(outputs["drafts"][0]["content"]) == 20_000
+    assert outputs["drafts"][0]["truncated"] is True
+    assert outputs["reviews"][0]["score"] == 1.0
+    assert outputs["reviews"][0]["decision"] == "rejected"
+    assert outputs["reviews"][0]["truncated"] is True
 
 
 def test_progress_emitter_bounds_and_sanitizes_payload():
@@ -228,13 +266,13 @@ def test_full_workflow_emits_review_rewrite_and_completion():
             return state
 
     with (
-        patch.object(rag_workflow, "get_safe_llm", return_value=object()),
-        patch.object(rag_workflow, "PlannerAgent", FakePlanner),
-        patch.object(rag_workflow, "ClarifierAgent", FakeClarifier),
-        patch.object(rag_workflow, "ResearcherAgent", FakeResearcher),
-        patch.object(rag_workflow, "ReaderAgent", FakeReader),
-        patch.object(rag_workflow, "WriterAgent", FakeWriter),
-        patch.object(rag_workflow, "ReviewerAgent", FakeReviewer),
+        patch.object(graph_module, "get_safe_llm", return_value=object()),
+        patch.object(graph_module, "PlannerAgent", FakePlanner),
+        patch.object(graph_module, "ClarifierAgent", FakeClarifier),
+        patch.object(graph_module, "ResearcherAgent", FakeResearcher),
+        patch.object(graph_module, "ReaderAgent", FakeReader),
+        patch.object(graph_module, "WriterAgent", FakeWriter),
+        patch.object(graph_module, "ReviewerAgent", FakeReviewer),
     ):
         result = rag_workflow.run_chat_workflow(
             "Explain hybrid retrieval",
@@ -279,6 +317,14 @@ def test_full_workflow_emits_review_rewrite_and_completion():
     ]
     assert review_events[0]["metadata"]["decision"] == "rewrite"
     assert review_events[1]["metadata"]["decision"] == "accept"
+    assert result["draft_history"] == [
+        {"iteration": 1, "content": "Draft 1"},
+        {"iteration": 2, "content": "Draft 2"},
+    ]
+    assert [review["feedback"] for review in result["review_history"]] == [
+        "Add stronger evidence.",
+        "Accepted.",
+    ]
 
 
 def test_workflow_progress_callback_failure_is_non_fatal():

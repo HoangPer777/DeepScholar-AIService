@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional
+import operator
+from typing import Annotated, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -9,12 +10,16 @@ class AgentState(BaseModel):
     article_id: Optional[int] = None
 
     need_clarification: bool = False
-    need_external_search: bool = False
+    need_external_search: bool = True
+    need_internal_search: bool = True
 
     # Những section nào của paper quan trọng nhất?
     focus_sections: List[str] = Field(default_factory=list)
     # Danh sách queries tìm kiếm web
     search_queries: List[str] = Field(default_factory=list)
+    web_search_queries: List[str] = Field(default_factory=list)
+    db_search_queries: List[str] = Field(default_factory=list)
+    search_keywords: List[str] = Field(default_factory=list)
 
     # Lưu câu hỏi sau khi làm rõ
     clarified_question: Optional[str] = None
@@ -23,6 +28,16 @@ class AgentState(BaseModel):
     vector_context: List[Dict] = Field(default_factory=list)
     # Lưu kết quả từ web search
     external_context: List[Dict] = Field(default_factory=list)
+    reader_status: str = "pending"
+    researcher_status: str = "pending"
+    retrieval_warnings: Annotated[List[str], operator.add] = Field(default_factory=list)
+    evidence_manifest: List[Dict] = Field(default_factory=list)
+    evidence_available: bool = False
+    workflow_status: str = "pending"
+    review_decision: Optional[str] = None
+    failure_code: Optional[str] = None
+    failure_message: Optional[str] = None
+    checkpoint_thread_id: Optional[str] = None
 
     # Bài viết lần đầu tiên từ Writer
     draft_answer: Optional[str] = None
@@ -31,6 +46,9 @@ class AgentState(BaseModel):
 
     # Lưu feedback từ Reviewer để Writer cải thiện
     review_feedback: Optional[str] = None
+    # Artifacts exposed to the initiating user for the Deep Research trace.
+    draft_history: List[Dict] = Field(default_factory=list)
+    review_history: List[Dict] = Field(default_factory=list)
 
     # Điểm số chất lượng (0.0 - 1.0)
     confidence_score: float = 0.0
@@ -40,8 +58,8 @@ class AgentState(BaseModel):
     max_iterations: int = 2
 
     # To track agent execution flow
-    logs: List[str] = Field(default_factory=list)
-    timings: Dict[str, int] = Field(default_factory=dict)
+    logs: Annotated[List[str], operator.add] = Field(default_factory=list)
+    timings: Annotated[Dict[str, int], operator.ior] = Field(default_factory=dict)
 
     # NEW: timing metadata for observability (Requirement 8.1)
     # Populated by the workflow routing layer, not the agents themselves

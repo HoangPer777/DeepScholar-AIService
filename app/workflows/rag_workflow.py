@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Callable, Optional
 
 from app.agents.clarifier import ClarifierAgent
@@ -25,6 +26,8 @@ from app.agents.reader import ReaderAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.reviewer import ReviewerAgent
 from app.agents.writer import WriterAgent
+from app.core.graph_checkpoint import get_graph_checkpointer
+from app.graph.build_graph import build_graph
 from app.core.config import settings
 from app.core.llm import get_safe_llm
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
@@ -173,11 +176,10 @@ def _save_research_context(session_id: str, result: dict) -> None:
         store = MemoryStore(redis_client)
 
         # Build ResearchReport from pipeline result
-        # A rejected draft is still useful conversation context, but it must not
-        # be promoted to reviewed_answer. Preserve it with its review metadata.
-        report_answer: str = (
-            result.get("reviewed_answer") or result.get("draft_answer") or ""
-        )
+        report_answer: str = result.get("reviewed_answer") or ""
+        if not report_answer:
+            logger.info("_save_research_context: not saving rejected report for session %s", session_id)
+            return
         confidence_score: float = float(result.get("confidence_score", 0.0))
         review_feedback: str = result.get("review_feedback") or ""
 
@@ -356,6 +358,25 @@ def run_chat_workflow(
     logger.info(
         "run_chat_workflow: session=%s mode=full_pipeline", session_id
     )
+
+    # LangGraph is the single orchestration source for full Deep Research.
+    # Fast Chat routing above remains intentionally outside this graph.
+    graph_state = AgentState(
+        question=question,
+        article_id=article_id,
+        checkpoint_thread_id=session_id,
+        timings=timings,
+    )
+    graph = build_graph(
+        checkpointer=get_graph_checkpointer(),
+        progress_callback=progress_callback,
+    )
+    graph_config = {"configurable": {"thread_id": session_id or f"research-{uuid.uuid4()}"}}
+    result = graph.invoke(graph_state, config=graph_config)
+    result["timings"] = timings
+    if session_id and result.get("reviewed_answer"):
+        _save_research_context(session_id, result)
+    return result
 
     state = AgentState(question=question, article_id=article_id)
 
@@ -538,6 +559,10 @@ def run_chat_workflow(
         t0 = time.time()
         p0 = time.perf_counter()
         state = writer.run(state)
+        state.draft_history.append({
+            "iteration": draft_iteration,
+            "content": state.draft_answer or "",
+        })
         model_usage["writer"] = _describe_model(writer_llm)
         writer_model = model_usage["writer"]
         state.writer_time = time.time() - t0
@@ -591,6 +616,12 @@ def run_chat_workflow(
             else "rewrite" if should_rewrite
             else "rejected"
         )
+        state.review_history.append({
+            "iteration": state.iteration_count,
+            "score": state.confidence_score,
+            "decision": review_decision,
+            "feedback": state.review_feedback or "",
+        })
         _emit_progress(
             progress_callback,
             phase="reviewing",
@@ -644,7 +675,7 @@ def run_chat_workflow(
     result["model_usage"] = model_usage
 
     # ── Task 7.2: save Research_Context after pipeline ───────────────────────
-    if session_id and (result.get("reviewed_answer") or result.get("draft_answer")):
+    if session_id and result.get("reviewed_answer"):
         p0 = time.perf_counter()
         _save_research_context(session_id, result)
         state.timings["context_save_ms"] = _elapsed_ms(p0)

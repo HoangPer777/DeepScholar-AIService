@@ -540,7 +540,7 @@ class TestResearchAPIContract:
         assert debug["timings"]["planner_ms"] == 10
         assert debug["timings"]["total_latency_ms"] == 25
 
-    def test_rejected_draft_is_returned_as_quality_outcome(self):
+    def test_rejected_draft_is_not_returned_as_quality_outcome(self):
         from app.api.research import _build_response
 
         response = _build_response(
@@ -555,7 +555,7 @@ class TestResearchAPIContract:
             "task-1",
         )
 
-        assert response["answer"] == "Unreviewed research draft."
+        assert response["answer"] == ""
         assert response["decision"] == "rejected"
         assert response["session_id"] == "task-1"
 

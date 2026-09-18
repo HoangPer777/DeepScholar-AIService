@@ -2,6 +2,7 @@ import asyncio
 import copy
 import concurrent.futures
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -50,6 +51,9 @@ _RESEARCH_AGENTS = {
 _MAX_ACTIVITIES = 50
 _MAX_SOURCE_PREVIEWS = 20
 _MAX_DETAIL_LENGTH = 500
+_MAX_AGENT_OUTPUTS = 2
+_MAX_DRAFT_LENGTH = 20_000
+_MAX_REVIEW_FEEDBACK_LENGTH = 5_000
 
 
 def _utc_now() -> str:
@@ -136,6 +140,42 @@ def _sanitize_model_info(value: dict | None) -> dict | None:
     return cleaned
 
 
+def _build_agent_outputs(result: dict) -> dict:
+    """Return bounded writer/reviewer artifacts for the initiating research job."""
+    drafts = []
+    for item in list(result.get("draft_history") or [])[-_MAX_AGENT_OUTPUTS:]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        drafts.append(
+            {
+                "iteration": max(1, int(item.get("iteration", len(drafts) + 1) or 1)),
+                "content": content[:_MAX_DRAFT_LENGTH],
+                "truncated": len(content) > _MAX_DRAFT_LENGTH,
+            }
+        )
+
+    reviews = []
+    for item in list(result.get("review_history") or [])[-_MAX_AGENT_OUTPUTS:]:
+        if not isinstance(item, dict):
+            continue
+        feedback = str(item.get("feedback") or "").strip()
+        decision = _truncate(item.get("decision"), 40).lower()
+        reviews.append(
+            {
+                "iteration": max(1, int(item.get("iteration", len(reviews) + 1) or 1)),
+                "score": max(0.0, min(1.0, float(item.get("score", 0.0) or 0.0))),
+                "decision": decision if decision in {"accept", "rewrite", "rejected"} else "rejected",
+                "feedback": feedback[:_MAX_REVIEW_FEEDBACK_LENGTH],
+                "truncated": len(feedback) > _MAX_REVIEW_FEEDBACK_LENGTH,
+            }
+        )
+
+    return {"drafts": drafts, "reviews": reviews}
+
+
 def _initial_job_snapshot(debug: bool = False) -> dict:
     now = _utc_now()
     return {
@@ -165,6 +205,13 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
     }
 
 
+def _synchronized(method):
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class _ProgressEmitter:
     """Maintain one bounded job snapshot and persist it without extra Redis reads."""
 
@@ -175,11 +222,14 @@ class _ProgressEmitter:
             (item.get("sequence", 0) for item in self._snapshot.get("activities", [])),
             default=0,
         )
+        self._lock = threading.RLock()
 
     @property
     def snapshot(self) -> dict:
-        return copy.deepcopy(self._snapshot)
+        with self._lock:
+            return copy.deepcopy(self._snapshot)
 
+    @_synchronized
     def emit(self, event: dict) -> None:
         try:
             phase = event.get("phase")
@@ -293,7 +343,7 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
     ]
     response = {
         "session_id": task_id,
-        "answer": result.get("reviewed_answer") or result.get("draft_answer") or "",
+        "answer": result.get("reviewed_answer") or "",
         "sources": [
             {
                 "index":       i + 1,
@@ -322,8 +372,9 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
             for agent, info in list((result.get("model_usage") or {}).items())[:8]
             if _sanitize_model_info(info) is not None
         },
-        "decision": "accept" if result.get("reviewed_answer") else "rejected",
+        "decision": result.get("review_decision") or ("accept" if result.get("reviewed_answer") else "rejected"),
         "review_feedback":   result.get("review_feedback"),
+        "agent_outputs": _build_agent_outputs(result),
     }
     if include_timings:
         response["timings"] = result.get("timings", {})
@@ -351,6 +402,20 @@ async def _run_job(
                 progress_callback=emitter.emit,
             ),
         )
+        if not result.get("reviewed_answer"):
+            failure_code = result.get("failure_code", "research_review_rejected")
+            snapshot = emitter.snapshot
+            snapshot.update(
+                {
+                    "status": "error",
+                    "error_code": failure_code,
+                    "error": result.get("failure_message") or result.get("review_feedback") or "Research could not be verified.",
+                    "retryable": failure_code in {"reviewer_unavailable", "graph_checkpoint_unavailable"},
+                    "agent_outputs": _build_agent_outputs(result),
+                }
+            )
+            _job_store.update_job(task_id, snapshot)
+            return
         response = _build_response(result, task_id, include_timings=debug)
         snapshot = emitter.snapshot
         response.update(
@@ -424,6 +489,7 @@ async def research_status(task_id: str):
             "progress": job.get("progress"),
             "activities": job.get("activities", []),
             "source_previews": job.get("source_previews", []),
+            "agent_outputs": job.get("agent_outputs"),
         }
     if job["status"] == "done":
         # Clean up after delivering result
