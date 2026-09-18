@@ -11,6 +11,55 @@ from app.tools.citation import (
 from app.workflows.states import AgentState
 
 
+_EVIDENCE_NOT_FOUND = {
+    "evidence not found in sources.",
+    "evidence not found in sources",
+}
+
+
+def _has_usable_evidence(citable_sources, vector_context) -> bool:
+    return bool(citable_sources or any((item.get("content") or "").strip() for item in vector_context))
+
+
+def _build_source_based_draft(
+    question: str,
+    citable_sources: list[tuple[int, dict]],
+    references_by_index: dict[int, str],
+    vector_context: list[dict],
+) -> str:
+    """Build an honest bounded draft when the model returns the empty sentinel."""
+    evidence = []
+    for index, source in citable_sources:
+        content = (source.get("content") or "").strip()[:900]
+        if content:
+            evidence.append(f"The supplied excerpt for source [{index}] states: {content} [{index}]")
+    for index, chunk in enumerate(vector_context, start=1):
+        content = (chunk.get("content") or "").strip()[:500]
+        if content:
+            evidence.append(f"The supplied internal excerpt [PDF-{index}] states: {content} [PDF-{index}]")
+
+    evidence_text = "\n\n".join(evidence) or "No usable evidence excerpt was returned."
+    comparison = (
+        "The available excerpts are presented side by side below; no unsupported performance comparison is inferred. "
+        + " ".join(f"[{index}]" for index, _ in citable_sources[:2])
+        if len(citable_sources) >= 2
+        else "The supplied excerpts do not support a direct quantitative comparison."
+    )
+    references = "\n".join(references_by_index.values())
+    return (
+        f"## Abstract\nThis source-grounded draft addresses: {question}. "
+        f"It reports only the evidence supplied below.\n\n"
+        f"## Introduction\nThe question is examined using the retrieved source excerpts. "
+        f"No claim beyond those excerpts is added.\n\n"
+        f"## Methodology\n{evidence_text}\n\n"
+        f"## Results & Key Advances\n{evidence_text}\n\n"
+        f"## Discussion\n{comparison}\n\n"
+        f"## Conclusion\nThe available evidence is limited to the cited excerpts above. "
+        f"Additional source text is required for stronger methodological or quantitative conclusions.\n\n"
+        f"## References\n{references}"
+    )
+
+
 class WriterAgent:
     def __init__(self, llm):
         self.llm = llm
@@ -104,6 +153,28 @@ Do not use any external [N] marker not listed above.
             for attempt in range(2):
                 res = self.llm.invoke(messages)
                 draft = str(getattr(res, "content", "") or "").strip()
+                if draft.casefold() in _EVIDENCE_NOT_FOUND:
+                    if attempt == 0:
+                        log(
+                            state,
+                            "[WriterAgent] Model returned the evidence sentinel despite retrieved context; retrying",
+                        )
+                        continue
+                    if _has_usable_evidence(citable_sources, state.vector_context):
+                        state.draft_answer = _build_source_based_draft(
+                            question,
+                            citable_sources,
+                            references_by_index,
+                            state.vector_context,
+                        )
+                        log(state, "[WriterAgent] Used bounded source-based fallback after repeated evidence sentinel")
+                        break
+                    state.draft_answer = None
+                    state.failure_code = "writer_insufficient_evidence"
+                    state.failure_message = "Writer could not find usable evidence excerpts for this question."
+                    state.workflow_status = "failed"
+                    log(state, "[WriterAgent] FAILED — no usable evidence excerpts")
+                    return state
                 if draft:
                     state.draft_answer = draft
                     break

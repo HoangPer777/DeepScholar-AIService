@@ -336,14 +336,26 @@ class _JobStoreMappingAdapter:
 _jobs = _JobStoreMappingAdapter()
 
 
-def _build_response(result: dict, task_id: str, include_timings: bool = False) -> dict:
+def _build_response(
+    result: dict,
+    task_id: str,
+    include_timings: bool = False,
+    include_unreviewed_draft: bool = False,
+) -> dict:
     raw_sources = [
         s for s in result.get("external_context", [])
         if s.get("title") != "__research_notes__"
     ]
+    reviewed_answer = result.get("reviewed_answer")
+    use_unreviewed_draft = (
+        include_unreviewed_draft
+        and not reviewed_answer
+        and result.get("review_decision") == "rejected"
+        and bool(result.get("draft_answer"))
+    )
     response = {
         "session_id": task_id,
-        "answer": result.get("reviewed_answer") or "",
+        "answer": reviewed_answer or (result.get("draft_answer") if use_unreviewed_draft else ""),
         "sources": [
             {
                 "index":       i + 1,
@@ -372,7 +384,13 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
             for agent, info in list((result.get("model_usage") or {}).items())[:8]
             if _sanitize_model_info(info) is not None
         },
-        "decision": result.get("review_decision") or ("accept" if result.get("reviewed_answer") else "rejected"),
+        "decision": (
+            "review_rejected"
+            if use_unreviewed_draft
+            else result.get("review_decision")
+            or ("accept" if reviewed_answer else "rejected")
+        ),
+        "review_status": "rejected" if use_unreviewed_draft else ("accepted" if reviewed_answer else "rejected"),
         "review_feedback":   result.get("review_feedback"),
         "agent_outputs": _build_agent_outputs(result),
     }
@@ -402,8 +420,18 @@ async def _run_job(
                 progress_callback=emitter.emit,
             ),
         )
-        if not result.get("reviewed_answer"):
-            failure_code = result.get("failure_code", "research_review_rejected")
+        failure_code = result.get("failure_code", "research_review_rejected")
+        can_return_rejected_draft = (
+            not result.get("reviewed_answer")
+            and result.get("review_decision") == "rejected"
+            and bool(result.get("draft_answer"))
+            and failure_code not in {
+                "reviewer_unavailable",
+                "writer_empty_response",
+                "graph_checkpoint_unavailable",
+            }
+        )
+        if not result.get("reviewed_answer") and not can_return_rejected_draft:
             snapshot = emitter.snapshot
             snapshot.update(
                 {
@@ -416,7 +444,12 @@ async def _run_job(
             )
             _job_store.update_job(task_id, snapshot)
             return
-        response = _build_response(result, task_id, include_timings=debug)
+        response = _build_response(
+            result,
+            task_id,
+            include_timings=debug,
+            include_unreviewed_draft=can_return_rejected_draft,
+        )
         snapshot = emitter.snapshot
         response.update(
             {

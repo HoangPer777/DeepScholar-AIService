@@ -197,6 +197,23 @@ def test_reviewer_skips_llm_when_writer_response_is_empty():
     assert result.review_feedback == "Writer model returned an empty response after one retry."
 
 
+def test_reviewer_skips_sentinel_draft_as_unusable_writer_output():
+    llm = MagicMock()
+    state = AgentState(
+        question="How does feedback improve reports?",
+        draft_answer="Evidence not found in sources.",
+        failure_code="writer_insufficient_evidence",
+        failure_message="Writer could not find usable evidence excerpts for this question.",
+    )
+
+    result = ReviewerAgent(llm).run(state)
+
+    llm.invoke.assert_not_called()
+    assert result.reviewed_answer is None
+    assert result.review_decision == "rejected"
+    assert result.review_feedback == state.failure_message
+
+
 def test_reviewer_rewrites_citation_without_citable_evidence():
     llm = MagicMock()
     llm.invoke.return_value.content = """{

@@ -540,24 +540,53 @@ class TestResearchAPIContract:
         assert debug["timings"]["planner_ms"] == 10
         assert debug["timings"]["total_latency_ms"] == 25
 
-    def test_rejected_draft_is_not_returned_as_quality_outcome(self):
+    def test_rejected_draft_can_be_returned_as_explicit_unreviewed_outcome(self):
         from app.api.research import _build_response
 
         response = _build_response(
             {
                 "reviewed_answer": None,
                 "draft_answer": "Unreviewed research draft.",
+                "review_decision": "rejected",
                 "external_context": [],
                 "confidence_score": 0.45,
                 "iteration_count": 1,
                 "review_feedback": "Add citations.",
             },
             "task-1",
+            include_unreviewed_draft=True,
         )
 
-        assert response["answer"] == ""
-        assert response["decision"] == "rejected"
+        assert response["answer"] == "Unreviewed research draft."
+        assert response["decision"] == "review_rejected"
+        assert response["review_status"] == "rejected"
         assert response["session_id"] == "task-1"
+
+    @pytest.mark.asyncio
+    async def test_rejected_draft_job_finishes_done_instead_of_error(self):
+        from app.api import research
+
+        workflow_result = {
+            "reviewed_answer": None,
+            "draft_answer": "Final draft retained after review rejection.",
+            "review_decision": "rejected",
+            "failure_code": "research_review_rejected",
+            "review_feedback": "Remove unsupported claims.",
+            "confidence_score": 0.58,
+            "iteration_count": 2,
+            "external_context": [],
+        }
+        with (
+            patch.object(research, "run_chat_workflow", return_value=workflow_result),
+            patch.object(research._job_store, "update_job") as update_job,
+        ):
+            await research._run_job("task-rejected", "reviewer agents")
+
+        final_snapshot = update_job.call_args.args[1]
+        assert final_snapshot["status"] == "done"
+        assert final_snapshot["result"]["answer"] == workflow_result["draft_answer"]
+        assert final_snapshot["result"]["decision"] == "review_rejected"
+        assert final_snapshot["result"]["review_feedback"] == workflow_result["review_feedback"]
 
     def test_research_request_accepts_message_alias(self):
         from app.schemas.request import ResearchRequest

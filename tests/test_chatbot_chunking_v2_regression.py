@@ -128,6 +128,42 @@ def test_writer_replaces_model_references_with_canonical_cited_entries():
     assert "[99]" not in result.draft_answer
 
 
+def test_writer_retries_evidence_sentinel_when_sources_are_available():
+    llm = SequencedLLM(["Evidence not found in sources.", "Grounded report [1]."])
+    state = AgentState(
+        question="How does feedback improve reports?",
+        external_context=[{
+            "title": "Feedback study",
+            "url": "https://example.com/feedback",
+            "content": "Feedback improves revision quality.",
+        }],
+    )
+
+    result = WriterAgent(llm).run(state)
+
+    assert llm.call_count == 2
+    assert result.draft_answer.startswith("Grounded report [1].")
+
+
+def test_writer_replaces_repeated_evidence_sentinel_with_source_draft():
+    llm = SequencedLLM(["Evidence not found in sources.", "Evidence not found in sources."])
+    state = AgentState(
+        question="How does feedback improve reports?",
+        external_context=[{
+            "title": "Feedback study",
+            "url": "https://example.com/feedback",
+            "content": "Feedback improves revision quality.",
+        }],
+    )
+
+    result = WriterAgent(llm).run(state)
+
+    assert result.failure_code is None
+    assert "Evidence not found in sources." not in result.draft_answer
+    assert "## Methodology" in result.draft_answer
+    assert "Feedback improves revision quality." in result.draft_answer
+
+
 def test_writer_marks_failure_after_two_empty_model_responses():
     llm = SequencedLLM(["", "   "])
     state = AgentState(

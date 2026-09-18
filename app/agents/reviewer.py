@@ -220,7 +220,7 @@ class ReviewerAgent:
         self.llm = llm
 
     def run(self, state: AgentState) -> AgentState:
-        if state.failure_code == "writer_empty_response":
+        if state.failure_code in {"writer_empty_response", "writer_insufficient_evidence"}:
             state.reviewed_answer = None
             state.review_decision = "rejected"
             state.confidence_score = 0.0
