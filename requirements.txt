@@ -2,6 +2,8 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 langchain>=0.3
 langgraph>=0.2
+langgraph-checkpoint-postgres>=3.1
+psycopg[binary,pool]>=3.3
 langchain-text-splitters>=0.3
 langchain-openai>=0.2
 langchain-google-genai>=2.0.7
@@ -34,3 +36,7 @@ redis>=5.0.0
 
 # Token counting for context window management (Memory Chatbot)
 tiktoken>=0.7.0
+
+# Test dependencies
+hypothesis>=6.0
+fakeredis>=2.0
