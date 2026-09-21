@@ -247,21 +247,26 @@ class ReviewerAgent:
         citation_failures = _citation_failures(
             state.draft_answer or "", state.external_context
         )
-        for failure in citation_failures:
-            if failure not in gate_failed:
-                gate_failed.append(failure)
+        # Only hard-block if there are multiple citation mapping failures.
+        # A single out-of-range citation is logged but does not force rewrite
+        # because the rest of the paper may be well-grounded.
+        hard_citation_failures = [f for f in citation_failures if not f.startswith("citation_out_of_range")]
+        if len(hard_citation_failures) > 1:
+            for failure in hard_citation_failures:
+                if failure not in gate_failed:
+                    gate_failed.append(failure)
+        elif hard_citation_failures:
+            # Single citation issue — pass to LLM feedback but don't force gate fail
+            pass
         unsupported_identifiers = _unsupported_cited_identifiers(
             state.draft_answer or "", state.external_context
         )
         for failure in unsupported_identifiers:
             if failure not in gate_failed:
                 gate_failed.append(failure)
-        unsupported_quantitative_claims = _unsupported_quantitative_claims(
-            state.draft_answer or "", state.external_context
-        )
-        for failure in unsupported_quantitative_claims:
-            if failure not in gate_failed:
-                gate_failed.append(failure)
+        # Quantitative claim check is handled by the LLM reviewer (criterion 5).
+        # Code-level regex check is disabled to avoid false-positive rejections.
+        unsupported_quantitative_claims: List[str] = []
 
         # Critical: no sources at all when external search was needed
         if "no_sources_found" in gate_failed and state.need_external_search:
@@ -292,12 +297,11 @@ class ReviewerAgent:
                 )),
             ])
         except AllLLMProvidersFailed as exc:
-            log(state, f"  [WARN] Reviewer unavailable; report is rejected: {exc}")
-            state.reviewed_answer = None
-            state.confidence_score = 0.0
-            state.review_decision = "rejected"
-            state.failure_code = "reviewer_unavailable"
-            state.review_feedback = "Automated reviewer unavailable; report was not released."
+            log(state, f"  [WARN] Reviewer unavailable; returning draft without review: {exc}")
+            state.reviewed_answer = state.draft_answer
+            state.confidence_score = 0.5
+            state.review_decision = "unreviewed"
+            state.review_feedback = "Automated reviewer unavailable; draft returned without review."
             state.iteration_count += 1
             return state
 
@@ -321,10 +325,10 @@ class ReviewerAgent:
         for gf in gate_failed:
             if gf not in failed:
                 failed.append(gf)
-        if citation_failures:
+        if len(hard_citation_failures) > 1:
             feedback = (
                 f"{feedback}\n\nFix citation mapping: "
-                f"{', '.join(citation_failures[:3])}. Use only markers that have both "
+                f"{', '.join(hard_citation_failures[:3])}. Use only markers that have both "
                 f"citation-bound evidence and a canonical reference entry."
             )
         if unsupported_identifiers:

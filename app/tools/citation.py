@@ -3,7 +3,7 @@ import requests
 from typing import Dict, List, Tuple
 
 
-MAX_CITABLE_SOURCES = 16
+MAX_CITABLE_SOURCES = 24
 
 
 def enrich_arxiv_metadata(sources: List[Dict]) -> List[Dict]:

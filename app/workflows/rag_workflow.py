@@ -330,7 +330,11 @@ def run_chat_workflow(
     )
     graph_config = {"configurable": {"thread_id": session_id or f"research-{uuid.uuid4()}"}}
     result = graph.invoke(graph_state, config=graph_config)
-    result["timings"] = timings
+    # Merge timings recorded by agents inside the graph back into the
+    # baseline dict (agents write to state.timings via the AgentState field).
+    merged_timings = {**timings, **(result.get("timings") or {})}
+    merged_timings["total_latency_ms"] = _elapsed_ms(start_perf)
+    result["timings"] = merged_timings
     if session_id and result.get("reviewed_answer"):
         _save_research_context(session_id, result)
     return result

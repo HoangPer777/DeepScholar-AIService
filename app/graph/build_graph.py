@@ -1,5 +1,6 @@
 """Compiled LangGraph orchestration for the grounded Deep Research workflow."""
 
+import time
 from typing import Callable, Optional
 
 from langgraph.graph import END, START, StateGraph
@@ -128,7 +129,9 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
 
     def planner_node(state: AgentState):
         emit(phase="planning", state="active", agent="planner", title="Planning research", detail="PlannerAgent is analyzing the question and defining the research scope.")
+        t0 = time.perf_counter()
         result = planner.run(state.model_copy(deep=True))
+        planner_ms = int((time.perf_counter() - t0) * 1000)
         emit(phase="planning", state="completed", agent="planner", title="Research plan complete", detail="PlannerAgent created web and internal retrieval plans.", metadata={"search_queries": result.search_queries[:5], "focus_sections": result.focus_sections[:10], "need_external_search": True})
         update = result.model_dump()
         update["model_usage"] = {
@@ -139,6 +142,7 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "writer": _not_called_model(writer_llm, "writer"),
             "reviewer": _not_called_model(reviewer_llm, "reviewer"),
         }
+        update["timings"] = {**state.timings, "planner_ms": planner_ms}
         return update
 
     def clarifier_node(state: AgentState):
@@ -177,12 +181,15 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
 
     def researcher_node(state: AgentState):
         emit(phase="searching", state="active", agent="researcher", title="Searching academic sources", detail=f"ResearcherAgent is processing up to {min(len(state.web_search_queries or state.search_queries), 5)} queries.")
+        t0 = time.perf_counter()
         result = researcher.run(state.model_copy(deep=True), progress_callback=progress_callback)
+        researcher_ms = int((time.perf_counter() - t0) * 1000)
         emit(phase="searching", state="completed" if result.researcher_status == "completed" else result.researcher_status, agent="researcher", title="Academic source search complete", detail=f"ResearcherAgent status: {result.researcher_status}.")
         return {
             "external_context": result.external_context,
             "researcher_status": result.researcher_status,
             "retrieval_warnings": result.retrieval_warnings,
+            "timings": {**state.timings, **result.timings, "researcher_ms": researcher_ms},
             "model_usage": {"researcher": _describe_model(researcher_llm, "researcher")},
         }
 
@@ -207,7 +214,9 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
     def writer_node(state: AgentState):
         draft_iteration = state.iteration_count + 1
         emit(phase="drafting", state="active", agent="writer", title=f"Writing draft {draft_iteration}", detail="WriterAgent is synthesizing the collected evidence.", iteration=draft_iteration, max_iterations=state.max_iterations)
+        t0 = time.perf_counter()
         result = writer.run(state.model_copy(deep=True))
+        writer_ms = int((time.perf_counter() - t0) * 1000)
         draft_history = [*state.draft_history, {
             "iteration": draft_iteration,
             "content": result.draft_answer or "",
@@ -218,13 +227,16 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "draft_history": draft_history,
             "failure_code": result.failure_code,
             "failure_message": result.failure_message,
+            "timings": {**state.timings, "writer_ms": (state.timings.get("writer_ms", 0) + writer_ms)},
             "model_usage": {"writer": _describe_model(writer_llm, "writer")},
             "writer_model": _describe_model(writer_llm, "writer"),
         }
 
     def reviewer_node(state: AgentState):
         emit(phase="reviewing", state="active", agent="reviewer", title=f"Reviewing draft {state.iteration_count + 1}", detail="ReviewerAgent is checking grounding and citation quality.", iteration=state.iteration_count + 1, max_iterations=state.max_iterations)
+        t0 = time.perf_counter()
         result = reviewer.run(state.model_copy(deep=True))
+        reviewer_ms = int((time.perf_counter() - t0) * 1000)
         decision = "accept" if result.reviewed_answer else ("rejected" if result.iteration_count >= result.max_iterations else "rewrite")
         review_history = [*state.review_history, {
             "iteration": result.iteration_count,
@@ -243,6 +255,7 @@ def build_graph(checkpointer=None, progress_callback: Optional[Callable[[dict], 
             "review_decision": result.review_decision,
             "review_history": review_history,
             "failure_code": result.failure_code,
+            "timings": {**state.timings, "reviewer_ms": (state.timings.get("reviewer_ms", 0) + reviewer_ms)},
             "model_usage": {"reviewer": _describe_model(reviewer_llm, "reviewer")},
         }
 
