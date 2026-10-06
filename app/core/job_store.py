@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from typing import Optional
 
 from app.core.config import settings
@@ -24,6 +25,7 @@ class RedisJobStore:
 
     def __init__(self) -> None:
         self._fallback: dict[str, dict] = {}
+        self._fallback_lock = threading.Lock()
         self._use_redis = True
         try:
             self._redis = create_redis_client(decode_responses=True)
@@ -42,6 +44,29 @@ class RedisJobStore:
         """Create a new job entry with TTL=1h."""
         self._set(task_id, initial_data)
 
+    def create_job_if_absent(self, task_id: str, initial_data: dict) -> bool:
+        """Atomically claim a task key without changing legacy job semantics."""
+        key = f"{JOB_KEY_PREFIX}{task_id}"
+        if self._use_redis:
+            try:
+                return bool(
+                    self._redis.set(
+                        key,
+                        json.dumps(initial_data),
+                        ex=JOB_TTL_SECONDS,
+                        nx=True,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("RedisJobStore.create_job_if_absent failed: %s", exc)
+                raise
+
+        with self._fallback_lock:
+            if task_id in self._fallback:
+                return False
+            self._fallback[task_id] = initial_data
+            return True
+
     def get_job(self, task_id: str) -> Optional[dict]:
         """Return job data or None if not found."""
         return self._get(task_id)
@@ -59,6 +84,11 @@ class RedisJobStore:
             except Exception as exc:
                 logger.warning("RedisJobStore.delete_job failed: %s", exc)
         self._fallback.pop(task_id, None)
+
+    @property
+    def is_persistent(self) -> bool:
+        """Whether job state is currently backed by Redis."""
+        return self._use_redis
 
     def _set(self, task_id: str, data: dict) -> None:
         if self._use_redis:
