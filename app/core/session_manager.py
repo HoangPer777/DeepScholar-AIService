@@ -17,7 +17,7 @@ import logging
 from typing import List, Optional, Type
 
 from sqlalchemy.orm import Session as DBSession
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.core.session_models import Session as SessionORM
 from app.schemas.chat_models import (
@@ -189,6 +189,52 @@ class SessionManager:
             )
 
         return self._orm_to_pydantic(db_session)
+
+    def ensure_session_exists(
+        self,
+        db: DBSession,
+        session_id: str,
+        user_id: str,
+        initial_query: str,
+    ):
+        """Create a session for its owner or verify an existing row without reassigning it."""
+        ORM = self._ORM
+        try:
+            normalized_id = str(uuid.UUID(str(session_id)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise SessionNotFoundError("Invalid session identifier.") from exc
+
+        existing = db.query(ORM).filter(ORM.session_id == normalized_id).first()
+        if existing is not None:
+            if str(existing.user_id) != str(user_id):
+                raise SessionOwnershipError("Session does not belong to the authenticated user.")
+            return existing
+
+        db_session = ORM(
+            session_id=normalized_id,
+            user_id=str(user_id),
+            initial_query=initial_query,
+            status=SessionStatus.ACTIVE.value,
+            message_count=0,
+        )
+        try:
+            db.add(db_session)
+            db.commit()
+            db.refresh(db_session)
+            return db_session
+        except IntegrityError:
+            db.rollback()
+            # A concurrent creator may have won. Verify ownership; never overwrite it.
+            existing = db.query(ORM).filter(ORM.session_id == normalized_id).first()
+            if existing is not None and str(existing.user_id) == str(user_id):
+                return existing
+            if existing is not None:
+                raise SessionOwnershipError("Session does not belong to the authenticated user.")
+            raise
+        except SQLAlchemyError:
+            db.rollback()
+            logger.error("Failed to ensure session %s for user %s", normalized_id, user_id)
+            raise
 
     # ------------------------------------------------------------------
     # list_sessions

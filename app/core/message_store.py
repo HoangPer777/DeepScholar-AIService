@@ -40,7 +40,7 @@ class MessageStore:
     """
 
     def __init__(self, session_manager: Optional[SessionManager] = None) -> None:
-        self._session_manager = session_manager or SessionManager()
+        self._session_manager = session_manager or SessionManager(session_orm_class=SessionORM)
 
     def save_message(
         self,
@@ -149,45 +149,12 @@ class MessageStore:
         Raises:
             SQLAlchemyError: On unexpected database errors.
         """
-        # Check if session already exists
-        existing = (
-            db.query(SessionORM)
-            .filter(SessionORM.session_id == session_id)
-            .first()
-        )
-
-        if existing is not None:
-            return existing
-
-        # Create new session
-        db_session = SessionORM(
+        return self._session_manager.ensure_session_exists(
+            db=db,
             session_id=session_id,
             user_id=user_id,
             initial_query=initial_query,
-            status="active",
-            message_count=0,
         )
-
-        try:
-            db.add(db_session)
-            db.commit()
-            db.refresh(db_session)
-        except SQLAlchemyError as exc:
-            db.rollback()
-            logger.error(
-                "Failed to create session '%s' for user '%s': %s",
-                session_id,
-                user_id,
-                exc,
-            )
-            raise
-
-        logger.info(
-            "Created session %s for user '%s' via ensure_session_exists",
-            session_id,
-            user_id,
-        )
-        return db_session
 
     def messages_to_pydantic(self, db_messages: List[MessageORM]) -> List[Message]:
         """Convert a list of MessageORM objects to Pydantic Message models.

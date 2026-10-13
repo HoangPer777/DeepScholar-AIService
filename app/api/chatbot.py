@@ -16,13 +16,15 @@ import logging
 import uuid
 
 import redis as redis_lib
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import AuthenticatedUser, get_current_user
 from app.core.database import SessionLocal
 from app.core.job_store import get_job_store
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.core.message_store import MessageStore
 from app.core.redis_client import create_redis_client
+from app.core.session_manager import SessionNotFoundError, SessionOwnershipError
 from app.schemas.chat_models import Message, MessageRole
 from app.schemas.request import ChatRequest
 from app.schemas.response import ChatResponse
@@ -61,7 +63,7 @@ def _build_chat_response(result: dict, session_id: str, article_id, include_timi
     answer = _answer_from_result(result)
     citations = _citations_from_result(result)
     response = {
-        "session_id": result.get("session_id") or session_id,
+        "session_id": session_id,
         "article_id": article_id,
         "answer": answer,
         "citations": citations,
@@ -93,6 +95,7 @@ async def _run_chat_job(
     session_id: str,
     require_context: bool = False,
     debug: bool = False,
+    owner_id: str | None = None,
 ):
     """Run chat workflow in thread pool and store result in _chat_jobs."""
     try:
@@ -117,33 +120,37 @@ async def _run_chat_job(
         # Dual-write after workflow completes
         _persist_to_postgres(
             session_id=session_id,
+            owner_id=owner_id,
             question=question,
             answer=answer,
             confidence_score=result.get("confidence_score", 0.0),
             citations=citations,
         )
         if not result.get("is_fast_chat"):
-            _persist_to_redis(session_id=session_id, question=question, answer=answer)
+            _persist_to_redis(session_id=session_id, owner_id=owner_id, question=question, answer=answer)
 
-        _job_store.update_job(task_id, {
+        _update_chat_job(task_id, owner_id, session_id, {
             "status": "done",
             "result": _build_chat_response(result, session_id, article_id, include_timings=debug),
         })
     except SessionContextNotFoundError:
         # Requirement 3.5: return 404 when session has no research context
         logger.warning("Chat job %s: session '%s' not found or has no research context", task_id, session_id)
-        _job_store.update_job(task_id, {
+        _update_chat_job(task_id, owner_id, session_id, {
             "status": "error",
             "error": f"Session '{session_id}' not found or has no research context. Please start a deep research session first.",
             "error_code": 404,
         })
     except Exception as e:
         logger.error("Chat job %s failed: %s", task_id, e)
-        _job_store.update_job(task_id, {"status": "error", "error": str(e)})
+        _update_chat_job(task_id, owner_id, session_id, {"status": "error", "error": str(e)})
 
 
 @router.post("/start")
-async def chat_start(request: ChatRequest):
+async def chat_start(
+    request: ChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Start async chat job. Returns task_id immediately.
     Client should poll GET /status/{task_id} until status == 'done'.
@@ -154,7 +161,18 @@ async def chat_start(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     require_context = request.session_id is not None
 
-    _job_store.create_job(task_id, {"status": "pending", "session_id": session_id, "debug": request.debug})
+    if require_context:
+        _require_owned_session(session_id, current_user.user_id)
+    else:
+        _create_owned_session(session_id, current_user.user_id, request.question)
+
+    _job_store.create_job(task_id, {
+        "kind": "chat",
+        "owner_id": current_user.user_id,
+        "session_id": session_id,
+        "status": "pending",
+        "debug": request.debug,
+    })
     asyncio.create_task(
         _run_chat_job(
             task_id,
@@ -163,30 +181,37 @@ async def chat_start(request: ChatRequest):
             session_id,
             require_context=require_context,
             debug=request.debug,
+            owner_id=current_user.user_id,
         )
     )
     return {"task_id": task_id, "session_id": session_id, "status": "pending"}
 
 
 @router.get("/status/{task_id}")
-async def chat_status(task_id: str):
+async def chat_status(
+    task_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """Poll chat job status. Returns result when done."""
     job = _job_store.get_job(task_id)
-    if not job:
+    if not job or job.get("kind") != "chat" or job.get("owner_id") != current_user.user_id:
         raise HTTPException(status_code=404, detail="Chat task not found")
+    _require_owned_session(job.get("session_id") or "", current_user.user_id)
     if job["status"] == "error":
         status_code = job.get("error_code", 500)
         raise HTTPException(status_code=status_code, detail=job["error"])
     if job["status"] == "done":
         result = job["result"]
-        _job_store.delete_job(task_id)
         return {"status": "done", **result}
     # Return session_id in pending response so frontend can track it
     return {"status": "pending", "session_id": job.get("session_id")}
 
 
 @router.post("/")
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Run full agentic pipeline: Planner → Clarifier → Researcher → Reader → Writer → Reviewer.
 
@@ -196,6 +221,10 @@ async def chat(request: ChatRequest):
     try:
         # Generate session_id if not provided
         session_id = request.session_id or str(uuid.uuid4())
+        if request.session_id:
+            _require_owned_session(session_id, current_user.user_id)
+        else:
+            _create_owned_session(session_id, current_user.user_id, request.question)
 
         # Run blocking LLM workflow in thread pool — keeps event loop free for
         # concurrent polling requests and other follow-up calls
@@ -215,6 +244,7 @@ async def chat(request: ChatRequest):
         # --- Dual-write: persist to PostgreSQL ---
         _persist_to_postgres(
             session_id=session_id,
+            owner_id=current_user.user_id,
             question=request.question,
             answer=answer,
             confidence_score=result.get("confidence_score", 0.0),
@@ -225,12 +255,13 @@ async def chat(request: ChatRequest):
         if not result.get("is_fast_chat"):
             _persist_to_redis(
                 session_id=session_id,
+                owner_id=current_user.user_id,
                 question=request.question,
                 answer=answer,
             )
 
         response_payload = ChatResponse(
-            session_id=result.get("session_id") or session_id,
+            session_id=session_id,
             article_id=request.article_id,
             answer=answer,
             citations=citations,
@@ -242,18 +273,25 @@ async def chat(request: ChatRequest):
         ).model_dump(exclude_none=True)
         response_payload["article_id"] = request.article_id
         return response_payload
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/history/{session_id}")
-async def chat_history(session_id: str):
+async def chat_history(
+    session_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Return chat history for a session.
 
     Strategy: try Redis first (fast, TTL 24h) → fallback to PostgreSQL (permanent).
     """
-    # --- Try Redis first ---
+    _require_owned_session(session_id, current_user.user_id)
+
+    # --- Try Redis first, only after validating ownership against the DB ---
     redis_client = create_redis_client(from_url=redis_lib.from_url)
     try:
         store = MemoryStore(redis_client)
@@ -301,11 +339,11 @@ async def chat_history(session_id: str):
 
 
 @router.get("/sessions")
-async def list_sessions(user_id: str = "anonymous"):
+async def list_sessions(current_user: AuthenticatedUser = Depends(get_current_user)):
     """
     List all chat sessions for a user from PostgreSQL.
 
-    Query param: user_id (default: "anonymous")
+    Identity is derived from the verified Backend principal, not query parameters.
     """
     from app.core.session_models import Session as SessionORM
     from sqlalchemy import desc
@@ -314,13 +352,13 @@ async def list_sessions(user_id: str = "anonymous"):
     try:
         sessions = (
             db.query(SessionORM)
-            .filter(SessionORM.user_id == user_id)
+            .filter(SessionORM.user_id == current_user.user_id)
             .order_by(desc(SessionORM.created_at))
             .limit(50)
             .all()
         )
         return {
-            "user_id": user_id,
+            "user_id": current_user.user_id,
             "sessions": [
                 {
                     "session_id": str(s.session_id),
@@ -334,8 +372,8 @@ async def list_sessions(user_id: str = "anonymous"):
             ],
         }
     except Exception as exc:
-        logger.error("Failed to list sessions for user %s: %s", user_id, exc)
-        return {"user_id": user_id, "sessions": []}
+        logger.error("Failed to list sessions for authenticated user")
+        raise HTTPException(status_code=503, detail="Chat sessions are temporarily unavailable.") from exc
     finally:
         db.close()
 
@@ -347,6 +385,7 @@ async def list_sessions(user_id: str = "anonymous"):
 
 def _persist_to_postgres(
     session_id: str,
+    owner_id: str,
     question: str,
     answer: str,
     confidence_score: float,
@@ -359,7 +398,7 @@ def _persist_to_postgres(
         _message_store.ensure_session_exists(
             db=db,
             session_id=session_id,
-            user_id="anonymous",  # Replace with real user_id when auth is added
+            user_id=owner_id,
             initial_query=question,
         )
 
@@ -393,7 +432,7 @@ def _persist_to_postgres(
         db.close()
 
 
-def _persist_to_redis(session_id: str, question: str, answer: str) -> None:
+def _persist_to_redis(session_id: str, owner_id: str, question: str, answer: str) -> None:
     """Save user message + assistant response to Redis MemoryStore. Fire-and-forget."""
     redis_client = create_redis_client(from_url=redis_lib.from_url)
     try:
@@ -401,7 +440,7 @@ def _persist_to_redis(session_id: str, question: str, answer: str) -> None:
 
         # Init context if this is a new session
         if not store.session_exists(session_id):
-            store.init_session_context(session_id)
+            store.init_session_context(session_id, user_id=owner_id)
 
         # Save user message
         store.save_message(
@@ -411,6 +450,7 @@ def _persist_to_redis(session_id: str, question: str, answer: str) -> None:
                 role=MessageRole.USER,
                 content=question,
             ),
+            user_id=owner_id,
         )
 
         # Save assistant response
@@ -421,6 +461,7 @@ def _persist_to_redis(session_id: str, question: str, answer: str) -> None:
                 role=MessageRole.ASSISTANT,
                 content=answer,
             ),
+            user_id=owner_id,
         )
     except Exception as exc:
         # Non-fatal: log and continue
@@ -448,3 +489,38 @@ def _extract_citations(result: dict) -> list:
         for i, s in enumerate(external)
         if s.get("title") != "__research_notes__"
     ]
+
+
+def _create_owned_session(session_id: str, owner_id: str, initial_query: str) -> None:
+    db = SessionLocal()
+    try:
+        _message_store.ensure_session_exists(db, session_id, owner_id, initial_query)
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Chat session not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to create authenticated chat session")
+        raise HTTPException(status_code=503, detail="Chat session storage is unavailable.") from exc
+    finally:
+        db.close()
+
+
+def _require_owned_session(session_id: str, owner_id: str) -> None:
+    db = SessionLocal()
+    try:
+        _message_store._session_manager.get_session(db, session_id, owner_id)
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Chat session not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to verify chat session ownership")
+        raise HTTPException(status_code=503, detail="Chat session storage is unavailable.") from exc
+    finally:
+        db.close()
+
+
+def _update_chat_job(task_id: str, owner_id: str, session_id: str, updates: dict) -> None:
+    job = _job_store.get_job(task_id)
+    if not job:
+        return
+    job.update(updates)
+    job.update({"kind": "chat", "owner_id": owner_id, "session_id": session_id})
+    _job_store.update_job(task_id, job)

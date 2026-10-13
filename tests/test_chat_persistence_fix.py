@@ -28,6 +28,27 @@ from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.schemas.chat_models import Message, MessageRole
 
 
+@pytest.fixture(autouse=True)
+def authenticated_local_api(monkeypatch):
+    """Legacy route tests use a fixed test principal and never touch real session storage."""
+    from app.core.auth import AuthenticatedUser, get_current_user
+    from app.main import app
+    from app.api import chatbot, research
+
+    previous = app.dependency_overrides.copy()
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("test-user")
+    monkeypatch.setattr(chatbot, "_create_owned_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_require_owned_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_persist_to_postgres", lambda **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_persist_to_redis", lambda **_kwargs: None)
+    monkeypatch.setattr(research, "_create_research_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(research.asyncio, "create_task", lambda coro: coro.close())
+    yield
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(previous)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers / fixtures
 # ---------------------------------------------------------------------------
@@ -576,6 +597,18 @@ class TestMessageStore:
         db, store, _, _ = db_and_store
         messages = store.get_messages(db, str(uuid.uuid4()))
         assert messages == []
+
+    def test_existing_session_owner_cannot_be_reassigned(self, db_and_store):
+        from app.core.session_manager import SessionOwnershipError
+
+        db, store, SessionORM, _ = db_and_store
+        session_id = str(uuid.uuid4())
+        db.add(SessionORM(session_id=session_id, user_id="owner-a", initial_query="initial"))
+        db.commit()
+
+        assert store.ensure_session_exists(db, session_id, "owner-a", "follow-up").user_id == "owner-a"
+        with pytest.raises(SessionOwnershipError):
+            store.ensure_session_exists(db, session_id, "owner-b", "attempted takeover")
 
 
 # ===========================================================================

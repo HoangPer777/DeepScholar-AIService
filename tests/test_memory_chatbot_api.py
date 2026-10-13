@@ -33,6 +33,28 @@ from app.schemas.chat_models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def authenticated_local_api(monkeypatch):
+    """Keep legacy API contract tests isolated from external auth and databases."""
+    from app.core.auth import AuthenticatedUser, get_current_user
+    from app.main import app
+    from app.api import chatbot, research
+
+    previous = app.dependency_overrides.copy()
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser("test-user")
+    monkeypatch.setattr(chatbot, "_create_owned_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_require_owned_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_persist_to_postgres", lambda **_kwargs: None)
+    monkeypatch.setattr(chatbot, "_persist_to_redis", lambda **_kwargs: None)
+    monkeypatch.setattr(research, "_create_research_session", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(research, "_require_research_session_owner", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chatbot.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(research.asyncio, "create_task", lambda coro: coro.close())
+    yield
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(previous)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -489,6 +511,9 @@ class TestResearchAPIContract:
         # Manually inject a completed job
         fake_task_id = str(uuid.uuid4())
         _jobs[fake_task_id] = {
+            "kind": "research",
+            "owner_id": "test-user",
+            "session_id": fake_task_id,
             "status": "done",
             "result": {
                 "answer": "RAG combines retrieval with generation.",
@@ -508,23 +533,26 @@ class TestResearchAPIContract:
         assert "sources" in data
         assert len(data["sources"]) == 1
 
-    def test_research_result_cleaned_up_after_fetch(self):
-        """After fetching a done result, it should be removed from _jobs."""
+    def test_research_result_remains_available_to_owner_after_fetch(self):
+        """Terminal research status remains pollable by its owner for the job TTL."""
         from app.api.research import _jobs
         from app.main import app
         client = TestClient(app)
 
         fake_task_id = str(uuid.uuid4())
         _jobs[fake_task_id] = {
+            "kind": "research",
+            "owner_id": "test-user",
+            "session_id": fake_task_id,
             "status": "done",
             "result": {"answer": "Done", "sources": [], "planner_decision": {},
                        "confidence_score": 0.5, "iterations_used": 1,
                        "decision": "accept", "review_feedback": None}
         }
         client.get(f"/api/research/status/{fake_task_id}")
-        # Second fetch should 404
         resp2 = client.get(f"/api/research/status/{fake_task_id}")
-        assert resp2.status_code == 404
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "done"
 
     def test_debug_timings_are_opt_in(self):
         """timings should only be included when debug=True."""

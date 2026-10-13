@@ -7,9 +7,13 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import AuthenticatedUser, get_current_user
+from app.core.database import SessionLocal
 from app.core.job_store import get_job_store
+from app.core.message_store import MessageStore
+from app.core.session_manager import SessionManager, SessionNotFoundError, SessionOwnershipError
 from app.schemas.request import ResearchRequest
 from app.workflows.rag_workflow import run_chat_workflow
 
@@ -495,24 +499,34 @@ async def _run_job(
 
 
 @router.post("/deep-research")
-async def deep_research(request: ResearchRequest):
+async def deep_research(
+    request: ResearchRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Start async deep research job. Returns task_id immediately.
     Client should poll GET /status/{task_id} until status == 'done'.
     """
     task_id = str(uuid.uuid4())
+    _create_research_session(task_id, current_user.user_id, request.query)
+
     snapshot = _initial_job_snapshot(request.debug)
+    snapshot.update({"kind": "research", "owner_id": current_user.user_id, "session_id": task_id})
     _job_store.create_job(task_id, snapshot)
     asyncio.create_task(_run_job(task_id, request.query, request.debug, snapshot))
     return {"task_id": task_id, "status": "pending"}
 
 
 @router.get("/status/{task_id}")
-async def research_status(task_id: str):
+async def research_status(
+    task_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """Poll job status. Returns result when done."""
     job = _job_store.get_job(task_id)
-    if not job:
+    if not job or job.get("kind") != "research" or job.get("owner_id") != current_user.user_id:
         raise HTTPException(status_code=404, detail="Task not found")
+    _require_research_session_owner(job.get("session_id") or "", current_user.user_id)
     if job["status"] == "error":
         return {
             "status": "error",
@@ -525,9 +539,7 @@ async def research_status(task_id: str):
             "agent_outputs": job.get("agent_outputs"),
         }
     if job["status"] == "done":
-        # Clean up after delivering result
         result = job["result"]
-        _job_store.delete_job(task_id)
         return {"status": "done", **result}
     pending = {"status": "pending"}
     if job.get("progress"):
@@ -539,3 +551,34 @@ async def research_status(task_id: str):
             }
         )
     return pending
+
+
+def _create_research_session(session_id: str, owner_id: str, query: str) -> None:
+    db = SessionLocal()
+    try:
+        MessageStore().ensure_session_exists(
+            db,
+            session_id=session_id,
+            user_id=owner_id,
+            initial_query=query,
+        )
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Research session not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to persist authenticated research session")
+        raise HTTPException(status_code=503, detail="Research session storage is unavailable.") from exc
+    finally:
+        db.close()
+
+
+def _require_research_session_owner(session_id: str, owner_id: str) -> None:
+    db = SessionLocal()
+    try:
+        SessionManager().get_session(db, session_id, owner_id)
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Research task not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to verify research session ownership")
+        raise HTTPException(status_code=503, detail="Research session storage is unavailable.") from exc
+    finally:
+        db.close()
