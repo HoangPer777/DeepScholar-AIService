@@ -29,6 +29,17 @@ class FakeJobStore:
         self.jobs[task_id] = data
         return True
 
+    def get_pdf_job(self, task_id):
+        job = self.jobs.get(task_id)
+        return job if job and job.get('kind') == 'pdf' else None
+
+    def update_pdf_job(self, task_id, updates):
+        job = self.get_pdf_job(task_id)
+        if not job or job.get('status') in {'completed', 'failed'}:
+            return job
+        job.update(updates)
+        return job
+
 
 def test_async_upload_returns_task_id_and_queues_job(monkeypatch):
     store = FakeJobStore()
@@ -55,10 +66,13 @@ def test_async_upload_returns_task_id_and_queues_job(monkeypatch):
 def test_status_returns_progress_for_valid_internal_request(monkeypatch):
     store = FakeJobStore()
     store.jobs["task-1"] = {
+        "kind": "pdf",
         "task_id": "task-1",
         "status": "running",
         "slug": "status-paper",
         "article_id": 42,
+        "generation": 1,
+        "content_revision": 0,
         "progress": {
             "phase": "embedding",
             "message": "Creating and storing document embeddings…",
@@ -77,6 +91,8 @@ def test_status_returns_progress_for_valid_internal_request(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "running"
     assert response.json()["progress"]["phase"] == "embedding"
+    assert response.json()["article_id"] == 42
+    assert response.json()["generation"] == 1
 
 
 def test_status_rejects_missing_internal_key(monkeypatch):
@@ -121,9 +137,44 @@ def test_status_returns_404_for_expired_task(monkeypatch):
     assert response.status_code == 404
 
 
+def test_status_does_not_expose_other_job_kinds(monkeypatch):
+    store = FakeJobStore()
+    store.jobs["chat-task"] = {"kind": "chat", "status": "done", "result": {"secret": "hidden"}}
+    monkeypatch.setattr(pdf, "_job_store", store)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/pdf/status",
+        params={"task_id": "chat-task"},
+        headers={"X-Internal-Service-Key": "test-internal-key"},
+    )
+
+    assert response.status_code == 404
+    assert "hidden" not in response.text
+
+
+def test_status_returns_503_when_shared_store_is_unavailable(monkeypatch):
+    class UnavailableStore(FakeJobStore):
+        def get_pdf_job(self, _task_id):
+            raise RuntimeError("redis down")
+
+    monkeypatch.setattr(pdf, "_job_store", UnavailableStore())
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/pdf/status",
+        params={"task_id": "pdf-task"},
+        headers={"X-Internal-Service-Key": "test-internal-key"},
+    )
+
+    assert response.status_code == 503
+    assert "redis down" not in response.text
+
+
 def test_pdf_job_transitions_to_completed(monkeypatch):
     store = FakeJobStore()
     store.jobs["task-success"] = {
+        "kind": "pdf",
         "task_id": "task-success",
         "status": "queued",
         "slug": "status-paper",
@@ -156,6 +207,7 @@ def test_pdf_job_transitions_to_completed(monkeypatch):
 def test_pdf_job_transitions_to_failed_without_exposing_exception(monkeypatch):
     store = FakeJobStore()
     store.jobs["task-failure"] = {
+        "kind": "pdf",
         "task_id": "task-failure",
         "status": "queued",
         "slug": "status-paper",

@@ -28,6 +28,17 @@ class FakePdfJobStore:
     def get_job(self, task_id):
         return self.jobs.get(task_id)
 
+    def get_pdf_job(self, task_id):
+        job = self.jobs.get(task_id)
+        return job if job and job.get("kind") == "pdf" else None
+
+    def update_pdf_job(self, task_id, updates):
+        job = self.get_pdf_job(task_id)
+        if not job or job.get("status") in {"completed", "failed"}:
+            return job
+        job.update(updates)
+        return job
+
 
 def _request():
     return pdf.PDFUploadRequest(

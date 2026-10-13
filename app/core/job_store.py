@@ -3,6 +3,8 @@ import logging
 import threading
 from typing import Optional
 
+from redis.exceptions import WatchError
+
 from app.core.config import settings
 from app.core.redis_client import create_redis_client, mask_redis_url
 
@@ -74,6 +76,58 @@ class RedisJobStore:
     def update_job(self, task_id: str, data: dict) -> None:
         """Update job data (refreshes TTL)."""
         self._set(task_id, data)
+
+    def get_pdf_job(self, task_id: str) -> Optional[dict]:
+        """Read a PDF job only from shared Redis; never use process-local fallback."""
+        if not self._use_redis:
+            raise RuntimeError("Persistent PDF job storage is unavailable")
+        try:
+            raw = self._redis.get(f"{JOB_KEY_PREFIX}{task_id}")
+        except Exception as exc:
+            logger.warning("RedisJobStore.get_pdf_job failed")
+            raise RuntimeError("Persistent PDF job storage is unavailable") from exc
+        if not raw:
+            return None
+        try:
+            job = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            logger.warning("RedisJobStore found malformed PDF job state")
+            raise RuntimeError("Persistent PDF job storage is unavailable") from exc
+        return job if isinstance(job, dict) and job.get("kind") == "pdf" else None
+
+    def update_pdf_job(self, task_id: str, updates: dict) -> Optional[dict]:
+        """Atomically merge a PDF snapshot update, preserving identity and terminal state."""
+        if not self._use_redis:
+            raise RuntimeError("Persistent PDF job storage is unavailable")
+        key = f"{JOB_KEY_PREFIX}{task_id}"
+        try:
+            for _ in range(5):
+                with self._redis.pipeline() as pipe:
+                    try:
+                        pipe.watch(key)
+                        raw = pipe.get(key)
+                        if not raw:
+                            return None
+                        current = json.loads(raw)
+                        if not isinstance(current, dict) or current.get("kind") != "pdf":
+                            return None
+                        if current.get("status") in {"completed", "failed"}:
+                            return current
+                        merged = {**current, **updates}
+                        merged["kind"] = "pdf"
+                        for identity in ("task_id", "article_id", "generation", "content_revision", "idempotency_key", "slug"):
+                            if identity in current:
+                                merged[identity] = current[identity]
+                        pipe.multi()
+                        pipe.set(key, json.dumps(merged), ex=JOB_TTL_SECONDS)
+                        pipe.execute()
+                        return merged
+                    except WatchError:
+                        continue
+            raise RuntimeError("PDF job changed too frequently to update safely")
+        except Exception as exc:
+            logger.warning("RedisJobStore.update_pdf_job failed")
+            raise RuntimeError("Persistent PDF job storage is unavailable") from exc
 
     def delete_job(self, task_id: str) -> None:
         """Delete job after result is delivered."""

@@ -58,6 +58,7 @@ class PDFUploadRequest(BaseModel):
 
 def _create_pdf_job(task_id: str, request: PDFUploadRequest) -> bool:
     initial_data = {
+        "kind": "pdf",
         "task_id": task_id,
         "status": "queued",
         "slug": request.slug,
@@ -69,7 +70,7 @@ def _create_pdf_job(task_id: str, request: PDFUploadRequest) -> bool:
     }
     created = _job_store.create_job_if_absent(task_id, initial_data)
     if not created:
-        existing = _job_store.get_job(task_id)
+        existing = _job_store.get_pdf_job(task_id)
         same_identity = bool(existing) and all(
             existing.get(name) == initial_data[name]
             for name in ("article_id", "generation", "content_revision", "idempotency_key", "slug")
@@ -80,9 +81,7 @@ def _create_pdf_job(task_id: str, request: PDFUploadRequest) -> bool:
 
 
 def _update_pdf_job(task_id: str, **updates) -> None:
-    current = _job_store.get_job(task_id) or {"task_id": task_id}
-    current.update(updates)
-    _job_store.update_job(task_id, current)
+    _job_store.update_pdf_job(task_id, updates)
 
 
 def _run_pdf_job(task_id: str, request: PDFUploadRequest) -> None:
@@ -479,15 +478,27 @@ async def pdf_status(
 ):
     """Return the real PDF job state for the authenticated backend proxy."""
     _require_internal_service_key(x_internal_service_key)
-    job = _job_store.get_job(task_id)
+    try:
+        job = _job_store.get_pdf_job(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="PDF job status is temporarily unavailable") from exc
     if not job:
-        raise HTTPException(status_code=404, detail="PDF task not found or expired")
+        raise HTTPException(
+            status_code=404,
+            detail="PDF task not found or expired",
+            headers={"X-Error-Code": "pdf_job_not_found_or_expired"},
+        )
 
     payload = {
+        "kind": "pdf",
         "status": job.get("status", "queued"),
         "task_id": task_id,
         "slug": job.get("slug"),
         "article_id": job.get("article_id"),
+        "generation": job.get("generation"),
+        "content_revision": job.get("content_revision"),
+        "article_saved": bool(job.get("article_saved", False)),
+        "embeddings_saved": bool(job.get("embeddings_saved", False)),
         "progress": job.get(
             "progress",
             _job_progress("queued", "PDF processing queued.", 0),
@@ -501,6 +512,4 @@ async def pdf_status(
                 "retryable": bool(job.get("retryable", True)),
             }
         )
-    if not _job_store.is_persistent:
-        payload["warning"] = "Status is held in process memory and may be lost if the AI service restarts."
     return payload
