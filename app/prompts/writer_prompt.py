@@ -2,10 +2,18 @@ WRITER_PROMPT = """
 You are a scientific writer. Write a rigorous academic research summary addressing: {QUESTION}
 
 STRICT RULES:
-- Use ONLY information from the provided sources. Do NOT add outside knowledge or synthesize beyond what sources say.
-- GROUNDING: Every factual claim, statistic, benchmark result, or specific finding MUST have its own inline citation [N] placed IMMEDIATELY after that claim.
+- Write ONLY from the provided source excerpts. Cite every factual claim [N] immediately after it.
+- Every named system, method, acronym, author, year, and quantitative result must be traceable
+  to the cited evidence excerpt — include it only when its exact identifier appears in that block.
+- If a claim cannot be cited from the source list, omit it entirely.
+- Research Notes are navigation summaries only. Verify every specific claim, metric, and method
+  name against the verbatim Citation-Bound Source Evidence excerpts before using it.
+- Use ONLY the citation markers listed under "Allowed external citation markers". A [N] marker
+  refers strictly to Citation-Bound Source Evidence block [N].
+- GROUNDING: Every factual claim, statistic, benchmark result, or specific finding MUST have its
+  own inline citation [N] placed IMMEDIATELY after that claim.
 - Do NOT group multiple claims under one citation at the end of a paragraph.
-- Do NOT write a claim if you cannot cite it from the source list. Write "Evidence not found in sources" instead.
+- Do NOT write a claim if you cannot cite it from the source list. Omit the claim instead.
 - In Results and Methodology: target at least 1 citation per 2 sentences.
 - Do NOT hallucinate: authors, years, venues, numbers, metrics, names.
 - Do NOT repeat claims across sections — each section adds new content.
@@ -47,4 +55,5 @@ QUALITY CHECKS:
 - Methodology in prose (no bullets)?
 - At least one A vs B comparison in Results?
 - No hallucinated facts?
+- Does every named system/framework/agent/acronym appear in its cited evidence block?
 """

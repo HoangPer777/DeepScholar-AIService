@@ -22,6 +22,14 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+def _normalize_abstract(text: str) -> str:
+    """Normalize PDF line wrapping without changing meaningful hyphenated words."""
+    text = (text or '').replace('\u00ad', '')
+    paragraphs = re.split(r'\n\s*\n+', text)
+    normalized = [re.sub(r'\s*\n\s*', ' ', paragraph).strip() for paragraph in paragraphs]
+    return '\n\n'.join(part for part in normalized if part)
+
+
 def remove_references(text: str) -> str:
     """
     Remove the 'References', 'Appendix', 'Acknowledgements' sections and everything after them.
@@ -131,7 +139,7 @@ def _parse_paper_sections(full_text: str) -> dict:
 
     return {
         "title": title,
-        "abstract": "\n".join(abstract_lines).strip(),
+        "abstract": _normalize_abstract("\n".join(abstract_lines)),
         "content": "\n".join(content_lines).strip(),
     }
 

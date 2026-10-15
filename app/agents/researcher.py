@@ -112,8 +112,7 @@ def _collect_sources_parallel(
         )
     capped = queries[:MAX_QUERIES]
 
-    all_results: List[dict] = []
-    seen_urls: set = set()
+    results_by_query: dict[str, List[dict]] = {}
     lock = threading.Lock()
 
     def fetch_one(q: str) -> List[dict]:
@@ -130,13 +129,7 @@ def _collect_sources_parallel(
                 results = future.result()
                 duration_ms = int((time.perf_counter() - query_started[query]) * 1000)
                 with lock:
-                    for r in results:
-                        url = r.get("url") or ""
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            all_results.append(r)
-                        elif not url:
-                            all_results.append(r)
+                    results_by_query[query] = results
                 _emit_progress(
                     progress_callback,
                     {
@@ -190,6 +183,25 @@ def _collect_sources_parallel(
                         },
                     },
                 )
+    # Futures complete nondeterministically. Interleave results in the original
+    # query order so one fast query cannot monopolize the citable-source window.
+    all_results: List[dict] = []
+    seen_urls: set = set()
+    max_results = max((len(results_by_query.get(query, [])) for query in capped), default=0)
+    for result_index in range(max_results):
+        for query_index, query in enumerate(capped):
+            query_results = results_by_query.get(query, [])
+            if result_index >= len(query_results):
+                continue
+            source = dict(query_results[result_index])
+            url = source.get("url") or ""
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            source["retrieval_query_index"] = query_index
+            source["retrieval_query"] = query
+            all_results.append(source)
     return all_results
 
 
@@ -202,28 +214,16 @@ class ResearcherAgent:
         state: AgentState,
         progress_callback: Optional[Callable[[dict], None]] = None,
     ) -> AgentState:
-        if not state.need_external_search:
-            log(state, "\n[ResearcherAgent] SKIPPED")
-            _emit_progress(
-                progress_callback,
-                {
-                    "phase": "synthesizing",
-                    "state": "skipped",
-                    "title": "No external source synthesis needed",
-                    "detail": "The pipeline is continuing with the available context.",
-                },
-            )
-            return state
+        state.need_external_search = True
 
         # Deduplicate queries
-        original_count = len(state.search_queries)
-        deduped_queries = _deduplicate_queries(state.search_queries)
+        original_count = len(state.web_search_queries or state.search_queries)
+        deduped_queries = _deduplicate_queries(state.web_search_queries or state.search_queries)
         if len(deduped_queries) < original_count:
             log(state, f"[ResearcherAgent] Queries: {original_count} → {len(deduped_queries)} after dedup")
 
         if not deduped_queries:
-            log(state, "[ResearcherAgent] WARNING: no queries after dedup — skipping")
-            return state
+            deduped_queries = [effective_question(state)]
 
         # Initial fetch (parallel)
         t0 = time.perf_counter()
@@ -279,6 +279,7 @@ class ResearcherAgent:
             )
 
         state.external_context = all_results
+        state.researcher_status = "completed"
 
         # Build numbered input for researcher LLM
         numbered = "\n\n".join(

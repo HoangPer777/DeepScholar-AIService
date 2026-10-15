@@ -1,11 +1,23 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import chatbot, health, pdf, research
 from app.core.config import settings
+from app.core.graph_checkpoint import close_graph_checkpointer, get_graph_checkpointer
 
 
-app = FastAPI(title=settings.PROJECT_NAME)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    get_graph_checkpointer()
+    try:
+        yield
+    finally:
+        close_graph_checkpointer()
+
+
+app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

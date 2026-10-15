@@ -2,13 +2,18 @@ import asyncio
 import copy
 import concurrent.futures
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.auth import AuthenticatedUser, get_current_user
+from app.core.database import SessionLocal
 from app.core.job_store import get_job_store
+from app.core.message_store import MessageStore
+from app.core.session_manager import SessionManager, SessionNotFoundError, SessionOwnershipError
 from app.schemas.request import ResearchRequest
 from app.workflows.rag_workflow import run_chat_workflow
 
@@ -50,6 +55,9 @@ _RESEARCH_AGENTS = {
 _MAX_ACTIVITIES = 50
 _MAX_SOURCE_PREVIEWS = 20
 _MAX_DETAIL_LENGTH = 500
+_MAX_AGENT_OUTPUTS = 3
+_MAX_DRAFT_LENGTH = 20_000
+_MAX_REVIEW_FEEDBACK_LENGTH = 5_000
 
 
 def _utc_now() -> str:
@@ -136,6 +144,42 @@ def _sanitize_model_info(value: dict | None) -> dict | None:
     return cleaned
 
 
+def _build_agent_outputs(result: dict) -> dict:
+    """Return bounded writer/reviewer artifacts for the initiating research job."""
+    drafts = []
+    for item in list(result.get("draft_history") or [])[-_MAX_AGENT_OUTPUTS:]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        drafts.append(
+            {
+                "iteration": max(1, int(item.get("iteration", len(drafts) + 1) or 1)),
+                "content": content[:_MAX_DRAFT_LENGTH],
+                "truncated": len(content) > _MAX_DRAFT_LENGTH,
+            }
+        )
+
+    reviews = []
+    for item in list(result.get("review_history") or [])[-_MAX_AGENT_OUTPUTS:]:
+        if not isinstance(item, dict):
+            continue
+        feedback = str(item.get("feedback") or "").strip()
+        decision = _truncate(item.get("decision"), 40).lower()
+        reviews.append(
+            {
+                "iteration": max(1, int(item.get("iteration", len(reviews) + 1) or 1)),
+                "score": max(0.0, min(1.0, float(item.get("score", 0.0) or 0.0))),
+                "decision": decision if decision in {"accept", "rewrite", "rejected"} else "rejected",
+                "feedback": feedback[:_MAX_REVIEW_FEEDBACK_LENGTH],
+                "truncated": len(feedback) > _MAX_REVIEW_FEEDBACK_LENGTH,
+            }
+        )
+
+    return {"drafts": drafts, "reviews": reviews}
+
+
 def _initial_job_snapshot(debug: bool = False) -> dict:
     now = _utc_now()
     return {
@@ -145,7 +189,7 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
             "phase": "queued",
             "message": "Research request accepted",
             "iteration": 0,
-            "max_iterations": 2,
+            "max_iterations": 3,
             "started_at": now,
             "updated_at": now,
         },
@@ -165,6 +209,13 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
     }
 
 
+def _synchronized(method):
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class _ProgressEmitter:
     """Maintain one bounded job snapshot and persist it without extra Redis reads."""
 
@@ -175,11 +226,14 @@ class _ProgressEmitter:
             (item.get("sequence", 0) for item in self._snapshot.get("activities", [])),
             default=0,
         )
+        self._lock = threading.RLock()
 
     @property
     def snapshot(self) -> dict:
-        return copy.deepcopy(self._snapshot)
+        with self._lock:
+            return copy.deepcopy(self._snapshot)
 
+    @_synchronized
     def emit(self, event: dict) -> None:
         try:
             phase = event.get("phase")
@@ -199,7 +253,7 @@ class _ProgressEmitter:
             current_progress = self._snapshot.get("progress", {})
             iteration = event.get("iteration", current_progress.get("iteration", 0))
             max_iterations = event.get(
-                "max_iterations", current_progress.get("max_iterations", 2)
+                "max_iterations", current_progress.get("max_iterations", 3)
             )
             message = _truncate(event.get("message") or event.get("title"))
 
@@ -286,14 +340,26 @@ class _JobStoreMappingAdapter:
 _jobs = _JobStoreMappingAdapter()
 
 
-def _build_response(result: dict, task_id: str, include_timings: bool = False) -> dict:
+def _build_response(
+    result: dict,
+    task_id: str,
+    include_timings: bool = False,
+    include_unreviewed_draft: bool = False,
+) -> dict:
     raw_sources = [
         s for s in result.get("external_context", [])
         if s.get("title") != "__research_notes__"
     ]
+    reviewed_answer = result.get("reviewed_answer")
+    use_unreviewed_draft = (
+        include_unreviewed_draft
+        and not reviewed_answer
+        and result.get("review_decision") == "rejected"
+        and bool(result.get("draft_answer"))
+    )
     response = {
         "session_id": task_id,
-        "answer": result.get("reviewed_answer") or result.get("draft_answer") or "",
+        "answer": reviewed_answer or (result.get("draft_answer") if use_unreviewed_draft else ""),
         "sources": [
             {
                 "index":       i + 1,
@@ -322,8 +388,16 @@ def _build_response(result: dict, task_id: str, include_timings: bool = False) -
             for agent, info in list((result.get("model_usage") or {}).items())[:8]
             if _sanitize_model_info(info) is not None
         },
-        "decision": "accept" if result.get("reviewed_answer") else "rejected",
+        "decision": (
+            "review_rejected"
+            if use_unreviewed_draft
+            else result.get("review_decision")
+            or ("accept" if reviewed_answer else "rejected")
+        ),
+        "review_status": "rejected" if use_unreviewed_draft else ("accepted" if reviewed_answer else "rejected"),
+        "fast_chat_ready": bool(result.get("fast_chat_ready", False)),
         "review_feedback":   result.get("review_feedback"),
+        "agent_outputs": _build_agent_outputs(result),
     }
     if include_timings:
         response["timings"] = result.get("timings", {})
@@ -351,7 +425,36 @@ async def _run_job(
                 progress_callback=emitter.emit,
             ),
         )
-        response = _build_response(result, task_id, include_timings=debug)
+        failure_code = result.get("failure_code", "research_review_rejected")
+        can_return_rejected_draft = (
+            not result.get("reviewed_answer")
+            and result.get("review_decision") == "rejected"
+            and bool(result.get("draft_answer"))
+            and failure_code not in {
+                "reviewer_unavailable",
+                "writer_empty_response",
+                "graph_checkpoint_unavailable",
+            }
+        )
+        if not result.get("reviewed_answer") and not can_return_rejected_draft:
+            snapshot = emitter.snapshot
+            snapshot.update(
+                {
+                    "status": "error",
+                    "error_code": failure_code,
+                    "error": result.get("failure_message") or result.get("review_feedback") or "Research could not be verified.",
+                    "retryable": failure_code in {"reviewer_unavailable", "graph_checkpoint_unavailable"},
+                    "agent_outputs": _build_agent_outputs(result),
+                }
+            )
+            _job_store.update_job(task_id, snapshot)
+            return
+        response = _build_response(
+            result,
+            task_id,
+            include_timings=debug,
+            include_unreviewed_draft=can_return_rejected_draft,
+        )
         snapshot = emitter.snapshot
         response.update(
             {
@@ -397,24 +500,34 @@ async def _run_job(
 
 
 @router.post("/deep-research")
-async def deep_research(request: ResearchRequest):
+async def deep_research(
+    request: ResearchRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Start async deep research job. Returns task_id immediately.
     Client should poll GET /status/{task_id} until status == 'done'.
     """
     task_id = str(uuid.uuid4())
+    _create_research_session(task_id, current_user.user_id, request.query)
+
     snapshot = _initial_job_snapshot(request.debug)
+    snapshot.update({"kind": "research", "owner_id": current_user.user_id, "session_id": task_id})
     _job_store.create_job(task_id, snapshot)
     asyncio.create_task(_run_job(task_id, request.query, request.debug, snapshot))
     return {"task_id": task_id, "status": "pending"}
 
 
 @router.get("/status/{task_id}")
-async def research_status(task_id: str):
+async def research_status(
+    task_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
     """Poll job status. Returns result when done."""
     job = _job_store.get_job(task_id)
-    if not job:
+    if not job or job.get("kind") != "research" or job.get("owner_id") != current_user.user_id:
         raise HTTPException(status_code=404, detail="Task not found")
+    _require_research_session_owner(job.get("session_id") or "", current_user.user_id)
     if job["status"] == "error":
         return {
             "status": "error",
@@ -424,11 +537,10 @@ async def research_status(task_id: str):
             "progress": job.get("progress"),
             "activities": job.get("activities", []),
             "source_previews": job.get("source_previews", []),
+            "agent_outputs": job.get("agent_outputs"),
         }
     if job["status"] == "done":
-        # Clean up after delivering result
         result = job["result"]
-        _job_store.delete_job(task_id)
         return {"status": "done", **result}
     pending = {"status": "pending"}
     if job.get("progress"):
@@ -440,3 +552,34 @@ async def research_status(task_id: str):
             }
         )
     return pending
+
+
+def _create_research_session(session_id: str, owner_id: str, query: str) -> None:
+    db = SessionLocal()
+    try:
+        MessageStore().ensure_session_exists(
+            db,
+            session_id=session_id,
+            user_id=owner_id,
+            initial_query=query,
+        )
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Research session not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to persist authenticated research session")
+        raise HTTPException(status_code=503, detail="Research session storage is unavailable.") from exc
+    finally:
+        db.close()
+
+
+def _require_research_session_owner(session_id: str, owner_id: str) -> None:
+    db = SessionLocal()
+    try:
+        SessionManager().get_session(db, session_id, owner_id)
+    except (SessionNotFoundError, SessionOwnershipError) as exc:
+        raise HTTPException(status_code=404, detail="Research task not found.") from exc
+    except Exception as exc:
+        logger.error("Unable to verify research session ownership")
+        raise HTTPException(status_code=503, detail="Research session storage is unavailable.") from exc
+    finally:
+        db.close()

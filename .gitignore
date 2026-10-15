@@ -26,9 +26,11 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Environment variables
+# Environment variables — never commit runtime env files
 .env
-.env.local
+.env.*
+!.env.example
+!.env.local.example
 
 # IDE
 .vscode/

@@ -16,16 +16,12 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Callable, Optional
 
-from app.agents.clarifier import ClarifierAgent
 from app.agents.fast_chat import FastChatAgent
-from app.agents.planner import PlannerAgent
-from app.agents.reader import ReaderAgent
-from app.agents.researcher import ResearcherAgent
-from app.agents.reviewer import ReviewerAgent
-from app.agents.writer import WriterAgent
-from app.core.config import settings
+from app.core.graph_checkpoint import get_graph_checkpointer
+from app.graph.build_graph import build_graph
 from app.core.llm import get_safe_llm
 from app.core.memory_store import MemoryStore, SessionContextNotFoundError
 from app.core.redis_client import create_redis_client
@@ -39,36 +35,6 @@ def _elapsed_ms(start: float) -> int:
     return int((time.perf_counter() - start) * 1000)
 
 
-def _describe_model(llm) -> dict:
-    """Return safe, user-facing model metadata without exposing credentials."""
-    usage_snapshot = getattr(llm, "usage_snapshot", None)
-    if callable(usage_snapshot):
-        return usage_snapshot()
-
-    candidates = getattr(llm, "candidates", None)
-    if isinstance(candidates, list) and candidates:
-        return {
-            "provider": "OpenRouter",
-            "model": None,
-            "status": "configured",
-            "routing": f"OpenRouter candidates · {len(candidates)} available",
-            "available_models": [str(candidate) for candidate in candidates],
-            "attempts": [],
-        }
-
-    model = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-    if not isinstance(model, str) or not model.strip():
-        model = getattr(settings, "GROQ_LLM_MODEL", "Configured model")
-    return {
-        "provider": str(getattr(settings, "AGENT_LLM_PROVIDER", "Configured")).title(),
-        "model": str(model),
-        "routing": "Direct provider",
-        "status": "configured",
-        "fallback_used": False,
-        "attempts": [],
-    }
-
-
 def _emit_progress(
     callback: Optional[Callable[[dict], None]],
     *,
@@ -79,7 +45,7 @@ def _emit_progress(
     detail: str = "",
     message: Optional[str] = None,
     iteration: int = 0,
-    max_iterations: int = 2,
+    max_iterations: int = 3,
     metadata: Optional[dict] = None,
     source_previews: Optional[list[dict]] = None,
 ) -> None:
@@ -155,7 +121,27 @@ def _persist_fast_chat(
 # ---------------------------------------------------------------------------
 
 
-def _save_research_context(session_id: str, result: dict) -> None:
+def _research_context_content(result: dict) -> tuple[str, str] | None:
+    """Return eligible report content and its review state for Fast Chat."""
+    reviewed_answer = result.get("reviewed_answer")
+    if reviewed_answer:
+        return reviewed_answer, "accepted"
+
+    failure_code = result.get("failure_code", "research_review_rejected")
+    if (
+        result.get("review_decision") == "rejected"
+        and result.get("draft_answer")
+        and failure_code not in {
+            "reviewer_unavailable",
+            "writer_empty_response",
+            "graph_checkpoint_unavailable",
+        }
+    ):
+        return result["draft_answer"], "unreviewed"
+    return None
+
+
+def _save_research_context(session_id: str, result: dict) -> bool:
     """Persist the pipeline result as a Research_Context in Redis.
 
     Called after the full pipeline completes so that subsequent follow-up
@@ -173,11 +159,11 @@ def _save_research_context(session_id: str, result: dict) -> None:
         store = MemoryStore(redis_client)
 
         # Build ResearchReport from pipeline result
-        # A rejected draft is still useful conversation context, but it must not
-        # be promoted to reviewed_answer. Preserve it with its review metadata.
-        report_answer: str = (
-            result.get("reviewed_answer") or result.get("draft_answer") or ""
-        )
+        selected_report = _research_context_content(result)
+        if selected_report is None:
+            logger.info("_save_research_context: no eligible report for session %s", session_id)
+            return False
+        report_answer, review_status = selected_report
         confidence_score: float = float(result.get("confidence_score", 0.0))
         review_feedback: str = result.get("review_feedback") or ""
 
@@ -206,6 +192,7 @@ def _save_research_context(session_id: str, result: dict) -> None:
             sources=sources,
             confidence_score=confidence_score,
             review_feedback=review_feedback,
+            review_status=review_status,
         )
 
         store.init_session_context(
@@ -215,16 +202,19 @@ def _save_research_context(session_id: str, result: dict) -> None:
         )
 
         logger.info(
-            "_save_research_context: saved context for session %s (%d sources)",
+            "_save_research_context: saved %s context for session %s (%d sources)",
+            review_status,
             session_id,
             len(sources),
         )
+        return True
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "_save_research_context: failed for session %s: %s",
             session_id,
             exc,
         )
+        return False
     finally:
         if redis_client is not None:
             try:
@@ -253,13 +243,7 @@ def run_chat_workflow(
       (``SessionContextNotFoundError``), fall through to the full pipeline.
     - If *session_id* is None, run the full pipeline directly.
 
-    Timing instrumentation (Requirement 8.1–8.4):
-    - ``start_time`` is recorded at function entry.
-    - Each agent call is wrapped with ``time.time()`` to populate
-      ``planner_time``, ``researcher_time``, ``writer_time``, ``reviewer_time``
-      in the returned state dict.
-    - Total elapsed is logged on completion.
-    - A WARNING is emitted when total elapsed exceeds 300 s.
+    Timing instrumentation is initialized here and may be enriched by agents.
 
     Args:
         question:   The user's research question or follow-up query.
@@ -357,344 +341,27 @@ def run_chat_workflow(
         "run_chat_workflow: session=%s mode=full_pipeline", session_id
     )
 
-    state = AgentState(question=question, article_id=article_id)
-
-    # Instantiate agents (same models as build_graph.py)
-    planner_llm = get_safe_llm("planner")
-    clarifier_llm = get_safe_llm("clarifier")
-    researcher_llm = get_safe_llm("researcher")
-    reviewer_llm = get_safe_llm("reviewer")
-    planner    = PlannerAgent(planner_llm)
-    clarifier  = ClarifierAgent(clarifier_llm)
-    researcher = ResearcherAgent(researcher_llm)
-    reader     = ReaderAgent()
-    writer_llm = get_safe_llm("writer")
-    writer     = WriterAgent(writer_llm)
-    writer_model_config = _describe_model(writer_llm)
-    reviewer   = ReviewerAgent(reviewer_llm)
-    model_usage: dict[str, dict] = {
-        "reader": {
-            "agent": "reader",
-            "provider": "Internal retrieval",
-            "model": None,
-            "status": "not_applicable",
-            "routing": "PGVector context",
-            "fallback_used": False,
-            "attempts": [],
-        },
-    }
-
-    # ── Planner ──────────────────────────────────────────────────────────────
-    _emit_progress(
-        progress_callback,
-        phase="planning",
-        state="active",
-        agent="planner",
-        title="Planning research",
-        detail="PlannerAgent is analyzing the question and defining the research scope.",
+    # LangGraph is the single orchestration source for full Deep Research.
+    # Fast Chat routing above remains intentionally outside this graph.
+    graph_state = AgentState(
+        question=question,
+        article_id=article_id,
+        checkpoint_thread_id=session_id,
+        timings=timings,
     )
-    t0 = time.time()
-    p0 = time.perf_counter()
-    state = planner.run(state)
-    model_usage["planner"] = _describe_model(planner_llm)
-    state.planner_time = time.time() - t0
-    state.timings["planner_ms"] = _elapsed_ms(p0)
-    logger.debug("planner_time=%.2fs", state.planner_time)
-    _emit_progress(
-        progress_callback,
-        phase="planning",
-        state="completed",
-        agent="planner",
-        title="Research plan complete",
-        detail=(
-            f"Created {len(state.search_queries)} queries and identified "
-            f"{len(state.focus_sections)} focus areas."
-        ),
-        metadata={
-            "search_queries": state.search_queries[:5],
-            "focus_sections": state.focus_sections[:10],
-            "need_external_search": state.need_external_search,
-            "model": model_usage["planner"].get("model"),
-            "provider": model_usage["planner"].get("provider"),
-            "duration_ms": state.timings["planner_ms"],
-        },
+    graph = build_graph(
+        checkpointer=get_graph_checkpointer(),
+        progress_callback=progress_callback,
     )
-
-    # ── Clarifier ────────────────────────────────────────────────────────────
-    if state.need_clarification:
-        _emit_progress(
-            progress_callback,
-            phase="clarifying",
-            state="active",
-            agent="clarifier",
-            title="Clarifying the research question",
-            detail="ClarifierAgent is standardizing the interpretation before source discovery.",
-        )
-    p0 = time.perf_counter()
-    state = clarifier.run(state)
-    model_usage["clarifier"] = _describe_model(clarifier_llm)
-    state.timings["clarifier_ms"] = _elapsed_ms(p0)
-    if state.need_clarification:
-        _emit_progress(
-            progress_callback,
-            phase="clarifying",
-            state="completed",
-            agent="clarifier",
-            title="Research question clarified",
-            detail="The question has been normalized for consistent use across the pipeline.",
-            metadata={"duration_ms": state.timings["clarifier_ms"]},
-        )
+    graph_config = {"configurable": {"thread_id": session_id or f"research-{uuid.uuid4()}"}}
+    result = graph.invoke(graph_state, config=graph_config)
+    # Merge timings recorded by agents inside the graph back into the
+    # baseline dict (agents write to state.timings via the AgentState field).
+    merged_timings = {**timings, **(result.get("timings") or {})}
+    merged_timings["total_latency_ms"] = _elapsed_ms(start_perf)
+    result["timings"] = merged_timings
+    if session_id and _research_context_content(result) is not None:
+        result["fast_chat_ready"] = _save_research_context(session_id, result)
     else:
-        _emit_progress(
-            progress_callback,
-            phase="clarifying",
-            state="skipped",
-            agent="clarifier",
-            title="Question is already clear",
-            detail="No additional clarification was needed.",
-            metadata={"duration_ms": state.timings["clarifier_ms"]},
-        )
-
-    # ── Researcher ───────────────────────────────────────────────────────────
-    if state.need_external_search:
-        _emit_progress(
-            progress_callback,
-            phase="searching",
-            state="active",
-            agent="researcher",
-            title="Searching academic sources",
-            detail=f"ResearcherAgent is processing up to {min(len(state.search_queries), 5)} queries.",
-            metadata={"total_queries": min(len(state.search_queries), 5)},
-        )
-    else:
-        _emit_progress(
-            progress_callback,
-            phase="searching",
-            state="skipped",
-            agent="researcher",
-            title="No external search needed",
-            detail="PlannerAgent determined that no additional web search is required.",
-        )
-    t0 = time.time()
-    p0 = time.perf_counter()
-    state = researcher.run(state, progress_callback=progress_callback)
-    model_usage["researcher"] = _describe_model(researcher_llm)
-    state.researcher_time = time.time() - t0
-    state.timings["researcher_ms"] = _elapsed_ms(p0)
-    logger.debug("researcher_time=%.2fs", state.researcher_time)
-
-    # ── Reader ───────────────────────────────────────────────────────────────
-    _emit_progress(
-        progress_callback,
-        phase="synthesizing",
-        state="skipped" if article_id is None else "active",
-        agent="reader",
-        title=(
-            "ReaderAgent skipped"
-            if article_id is None
-            else "ReaderAgent is reading internal documents"
-        ),
-        detail=(
-            "This session has no linked internal document; continuing with external sources."
-            if article_id is None
-            else "ReaderAgent is retrieving relevant passages from the personal library."
-        ),
-    )
-    p0 = time.perf_counter()
-    state = reader.run(state)
-    model_usage["reader"]["duration_ms"] = _elapsed_ms(p0)
-    state.timings["reader_ms"] = _elapsed_ms(p0)
-    if article_id is not None:
-        _emit_progress(
-            progress_callback,
-            phase="synthesizing",
-            state="completed",
-            agent="reader",
-            title="ReaderAgent finished retrieval",
-            detail="Relevant internal passages are ready for synthesis.",
-            metadata={"duration_ms": state.timings["reader_ms"]},
-        )
-
-    # ── Writer → Reviewer loop (mirrors _review_router in build_graph.py) ────
-    while True:
-        draft_iteration = state.iteration_count + 1
-        _emit_progress(
-            progress_callback,
-            phase="drafting",
-            state="active",
-            agent="writer",
-            title=f"Writing draft {draft_iteration}",
-            detail=(
-                "WriterAgent is synthesizing evidence and building a cited report."
-                + (f" Focus: {', '.join(state.focus_sections[:4])}." if state.focus_sections else "")
-            ),
-            iteration=draft_iteration,
-            max_iterations=state.max_iterations,
-            metadata={
-                "model_status": "selecting",
-                "available_models": writer_model_config.get("available_models", []),
-            },
-        )
-        t0 = time.time()
-        p0 = time.perf_counter()
-        state = writer.run(state)
-        model_usage["writer"] = _describe_model(writer_llm)
-        writer_model = model_usage["writer"]
-        state.writer_time = time.time() - t0
-        state.timings["writer_ms"] = state.timings.get("writer_ms", 0) + _elapsed_ms(p0)
-        logger.debug("writer_time=%.2fs", state.writer_time)
-        _emit_progress(
-            progress_callback,
-            phase="drafting",
-            state="completed",
-            agent="writer",
-            title=f"Draft {draft_iteration} complete",
-            detail="The draft is ready for quality review.",
-            iteration=draft_iteration,
-            max_iterations=state.max_iterations,
-            metadata={
-                "draft_length": len(state.draft_answer or ""),
-                "model": writer_model.get("model"),
-                "provider": writer_model.get("provider"),
-                "model_status": writer_model.get("status"),
-                "fallback_used": writer_model.get("fallback_used", False),
-                "model_attempts": writer_model.get("attempts", []),
-                "duration_ms": state.timings.get("writer_ms", 0),
-            },
-        )
-
-        _emit_progress(
-            progress_callback,
-            phase="reviewing",
-            state="active",
-            agent="reviewer",
-            title=f"Reviewing draft {draft_iteration}",
-            detail="ReviewerAgent is checking completeness, citations, and source quality.",
-            iteration=draft_iteration,
-            max_iterations=state.max_iterations,
-        )
-        t0 = time.time()
-        p0 = time.perf_counter()
-        state = reviewer.run(state)
-        model_usage["reviewer"] = _describe_model(reviewer_llm)
-        state.reviewer_time = time.time() - t0
-        state.timings["reviewer_ms"] = state.timings.get("reviewer_ms", 0) + _elapsed_ms(p0)
-        logger.debug("reviewer_time=%.2fs", state.reviewer_time)
-
-        should_rewrite = (
-            state.reviewed_answer is None
-            and state.confidence_score < 0.7
-            and state.iteration_count < state.max_iterations
-        )
-        review_decision = (
-            "accept" if state.reviewed_answer is not None
-            else "rewrite" if should_rewrite
-            else "rejected"
-        )
-        _emit_progress(
-            progress_callback,
-            phase="reviewing",
-            state="completed",
-            agent="reviewer",
-            title=f"Draft {state.iteration_count} reviewed",
-            detail=state.review_feedback or "ReviewerAgent did not provide additional feedback.",
-            iteration=state.iteration_count,
-            max_iterations=state.max_iterations,
-            metadata={
-                "score": state.confidence_score,
-                "decision": review_decision,
-                "iteration": state.iteration_count,
-                "focus_sections": state.focus_sections[:6],
-                "model": model_usage["reviewer"].get("model"),
-                "provider": model_usage["reviewer"].get("provider"),
-                "model_status": model_usage["reviewer"].get("status"),
-                "model_attempts": model_usage["reviewer"].get("attempts", []),
-                "duration_ms": state.timings.get("reviewer_ms", 0),
-            },
-        )
-
-        # Replicate _review_router logic from build_graph.py
-        if should_rewrite:
-            # Trigger rewrite loop
-            _emit_progress(
-                progress_callback,
-                phase="rewriting",
-                state="active",
-                agent="writer",
-                title=f"Preparing draft rewrite {state.iteration_count + 1}",
-                detail=state.review_feedback or "The draft needs improvement based on the quality review.",
-                iteration=state.iteration_count + 1,
-                max_iterations=state.max_iterations,
-            )
-            continue
-        break
-
-    _emit_progress(
-        progress_callback,
-        phase="finalizing",
-        state="active",
-        agent="system",
-        title="Finalizing the report",
-        detail="DeepScholar is packaging the final content, sources, and metadata.",
-        iteration=state.iteration_count,
-        max_iterations=state.max_iterations,
-    )
-    result = state.model_dump()
-    result["writer_model"] = model_usage.get("writer", writer_model_config)
-    result["model_usage"] = model_usage
-
-    # ── Task 7.2: save Research_Context after pipeline ───────────────────────
-    if session_id and (result.get("reviewed_answer") or result.get("draft_answer")):
-        p0 = time.perf_counter()
-        _save_research_context(session_id, result)
-        state.timings["context_save_ms"] = _elapsed_ms(p0)
-
-    # ── Task 7.3: log total elapsed + slow-query warning ─────────────────────
-    elapsed = time.time() - start_time
-    state.timings["total_latency_ms"] = _elapsed_ms(start_perf)
-    result["timings"] = {**timings, **state.timings}
-    logger.info(
-        "run_chat_workflow: full_pipeline completed in %.2fs "
-        "(planner=%.2fs researcher=%.2fs writer=%.2fs reviewer=%.2fs) session=%s",
-        elapsed,
-        state.planner_time,
-        state.researcher_time,
-        state.writer_time,
-        state.reviewer_time,
-        session_id,
-    )
-
-    if elapsed > 300:  # Requirement 8.4
-        logger.warning(
-            "run_chat_workflow: SLOW QUERY — exceeded 300s (%.2fs) for "
-            "query='%s' session=%s "
-            "(planner=%.2fs researcher=%.2fs writer=%.2fs reviewer=%.2fs)",
-            elapsed,
-            question[:100],
-            session_id,
-            state.planner_time,
-            state.researcher_time,
-            state.writer_time,
-            state.reviewer_time,
-        )
-
-    _emit_progress(
-        progress_callback,
-        phase="completed",
-        state="completed",
-        agent="system",
-        title="Research report complete",
-        detail=(
-            f"Report completed with "
-            f"{len([s for s in state.external_context if s.get('title') != '__research_notes__'])} sources."
-        ),
-        message="Research report completed",
-        iteration=state.iteration_count,
-        max_iterations=state.max_iterations,
-        metadata={
-            "confidence_score": state.confidence_score,
-            "iterations_used": state.iteration_count,
-            "total_latency_ms": state.timings.get("total_latency_ms", 0),
-        },
-    )
+        result["fast_chat_ready"] = False
     return result

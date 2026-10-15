@@ -16,9 +16,12 @@ class PlannerAgent:
         if cached:
             log(state, "[PlannerAgent] Cache HIT")
             state.need_clarification = cached.get("need_clarification", False)
-            state.need_external_search = cached.get("need_external_search", True)
+            state.need_external_search = True
             state.focus_sections = cached.get("focus_sections", [])
-            state.search_queries = cached.get("search_queries", [state.question])
+            state.search_queries = cached.get("search_queries") or [state.question]
+            state.web_search_queries = cached.get("web_search_queries") or state.search_queries
+            state.db_search_queries = cached.get("db_search_queries") or [state.question]
+            state.search_keywords = cached.get("search_keywords", [])
             return state
 
         response = self.llm.invoke([
@@ -28,9 +31,22 @@ class PlannerAgent:
         data = safe_json(response.content)
 
         state.need_clarification = data.get("need_clarification", False)
-        state.need_external_search = data.get("need_external_search", True)
+        # Deep Research always collects external evidence; a planner response is
+        # not allowed to silently disable the Researcher branch.
+        state.need_external_search = True
         state.focus_sections = data.get("focus_sections", [])
-        state.search_queries = data.get("search_queries", [state.question])
+        state.search_queries = data.get("search_queries") or [state.question]
+        state.web_search_queries = data.get("web_search_queries") or state.search_queries
+        state.db_search_queries = data.get("db_search_queries") or [state.question]
+        state.search_keywords = data.get("search_keywords", [])
+
+        data.update({
+            "need_external_search": True,
+            "search_queries": state.search_queries,
+            "web_search_queries": state.web_search_queries,
+            "db_search_queries": state.db_search_queries,
+            "search_keywords": state.search_keywords,
+        })
 
         cache.set(state.question, data)
 

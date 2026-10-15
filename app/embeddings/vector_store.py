@@ -1,9 +1,11 @@
 import json
 import traceback
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import inspect, text
+from sqlalchemy import and_, column, inspect, or_, table, text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -13,6 +15,14 @@ from app.embeddings.models import ArticleChunk, Base, Embedding
 from app.pdf_pipeline.chunker import PaperChunk, normalize_section_name
 
 logger = get_logger(__name__)
+_articles = table(
+    "articles",
+    column("id"),
+    column("pdf_generation"),
+    column("content_revision"),
+)
+_PDF_GENERATION_METADATA_KEY = "__deepscholar_pdf_generation"
+_PDF_CONTENT_REVISION_METADATA_KEY = "__deepscholar_content_revision"
 
 REQUIRED_ARTICLE_CHUNK_COLUMNS = {
     "id",
@@ -153,7 +163,13 @@ def _safe_section(section: str | None) -> str:
     return normalized
 
 
-def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
+def ingest_article_chunks(
+    article_id: int,
+    chunks: list[str],
+    *,
+    pdf_generation: int | None = None,
+    content_revision: int | None = None,
+) -> dict:
     """
     Legacy fallback ingestion for plain string chunks.
     """
@@ -176,31 +192,101 @@ def ingest_article_chunks(article_id: int, chunks: list[str]) -> dict:
         )
         for i, chunk_text in enumerate(chunks)
     ]
-    return ingest_paper_chunks(article_id, paper_chunks)
+    return ingest_paper_chunks(
+        article_id,
+        paper_chunks,
+        pdf_generation=pdf_generation,
+        content_revision=content_revision,
+    )
 
 
-def ingest_paper_chunks(article_id: int, chunks: list[PaperChunk]) -> dict:
+def _is_retryable_ingest_error(error: Exception) -> bool:
+    if isinstance(error, (OperationalError, InterfaceError)):
+        return True
+    if isinstance(error, DBAPIError):
+        return bool(error.connection_invalidated)
+    code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    message = str(error).upper()
+    return code in {429, 500, 502, 503, 504} or any(
+        marker in message
+        for marker in ("429", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "TIMEOUT")
+    )
+
+
+def ingest_paper_chunks(
+    article_id: int,
+    chunks: list[PaperChunk],
+    *,
+    pdf_generation: int | None = None,
+    content_revision: int | None = None,
+) -> dict:
     """
     Store structured paper chunks and Google embeddings in database.
     """
     if not chunks:
         return {"stored": False, "chunk_count": 0, "message": "No chunks provided"}
 
-    ensure_pgvector_schema()
+    try:
+        ensure_pgvector_schema()
+        embedding_inputs = [chunk.content_for_embedding or chunk.content for chunk in chunks]
+        embeddings_list = embed_texts(embedding_inputs)
+        if len(embeddings_list) != len(chunks):
+            raise ValueError(
+                f"Embedding count mismatch: received {len(embeddings_list)} vectors "
+                f"for {len(chunks)} chunks"
+            )
+        _validate_embedding_dimensions(embeddings_list)
 
-    with SessionLocal() as session:
-        try:
+        with SessionLocal() as session:
+            if pdf_generation is not None:
+                lock_suffix = " FOR UPDATE" if session.bind.dialect.name == "postgresql" else ""
+                article_row = session.execute(
+                    text(
+                        "SELECT pdf_generation, content_revision, pdf_generation_deadline FROM articles "
+                        "WHERE id = :article_id" + lock_suffix
+                    ),
+                    {"article_id": article_id},
+                ).first()
+                if not article_row:
+                    return {
+                        "stored": False,
+                        "chunk_count": 0,
+                        "error_code": "article_not_found",
+                        "error": "Article not found for PDF embedding write.",
+                        "retryable": False,
+                    }
+                if (
+                    article_row.pdf_generation != pdf_generation
+                    or article_row.content_revision != content_revision
+                ):
+                    return {
+                        "stored": False,
+                        "chunk_count": 0,
+                        "error_code": "stale_pdf_generation",
+                        "error": "PDF embedding write belongs to a stale article revision.",
+                        "retryable": False,
+                    }
+                deadline_at = article_row.pdf_generation_deadline
+                if deadline_at is None:
+                    return {
+                        "stored": False,
+                        "chunk_count": 0,
+                        "error_code": "pdf_generation_expired",
+                        "error": "The PDF generation has no active deadline.",
+                        "retryable": False,
+                    }
+                if deadline_at.tzinfo is None:
+                    deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+                if deadline_at <= datetime.now(timezone.utc):
+                    return {
+                        "stored": False,
+                        "chunk_count": 0,
+                        "error_code": "pdf_generation_expired",
+                        "error": "The PDF generation deadline has expired.",
+                        "retryable": False,
+                    }
+
             _delete_existing_chunks(session, article_id)
-
-            embedding_inputs = [chunk.content_for_embedding or chunk.content for chunk in chunks]
-            embeddings_list = embed_texts(embedding_inputs)
-            if len(embeddings_list) != len(chunks):
-                raise ValueError(
-                    f"Embedding count mismatch: received {len(embeddings_list)} vectors "
-                    f"for {len(chunks)} chunks"
-                )
-            _validate_embedding_dimensions(embeddings_list)
-
             type_counts = Counter(chunk.chunk_type for chunk in chunks)
             for i, (chunk, embedding_vector) in enumerate(zip(chunks, embeddings_list)):
                 db_chunk = ArticleChunk(
@@ -214,7 +300,15 @@ def ingest_paper_chunks(article_id: int, chunks: list[PaperChunk]) -> dict:
                     page_start=chunk.page_start,
                     page_end=chunk.page_end,
                     token_count=chunk.token_count,
-                    metadata_json=chunk.metadata,
+                    metadata_json=(
+                        {
+                            **(chunk.metadata or {}),
+                            _PDF_GENERATION_METADATA_KEY: pdf_generation,
+                            _PDF_CONTENT_REVISION_METADATA_KEY: content_revision,
+                        }
+                        if pdf_generation is not None and content_revision is not None
+                        else chunk.metadata
+                    ),
                     chunking_version=chunk.chunking_version or settings.CHUNKING_VERSION,
                 )
                 session.add(db_chunk)
@@ -232,14 +326,21 @@ def ingest_paper_chunks(article_id: int, chunks: list[PaperChunk]) -> dict:
                 "embedding_model": settings.GOOGLE_EMBEDDING_MODEL,
                 "chunk_type_counts": dict(type_counts),
             }
-        except Exception as e:
-            session.rollback()
-            logger.error(f"ingest_paper_chunks failed: {e}\n{traceback.format_exc()}")
-            return {"stored": False, "chunk_count": 0, "error": str(e)}
+    except Exception as e:
+        logger.error(f"ingest_paper_chunks failed: {e}\n{traceback.format_exc()}")
+        return {
+            "stored": False,
+            "chunk_count": 0,
+            "error": str(e),
+            "retryable": _is_retryable_ingest_error(e),
+        }
 
 
 def _row_to_result(row) -> dict:
     chunk = row.ArticleChunk
+    metadata = dict(chunk.metadata_json or {})
+    metadata.pop(_PDF_GENERATION_METADATA_KEY, None)
+    metadata.pop(_PDF_CONTENT_REVISION_METADATA_KEY, None)
     return {
         "chunk_id": chunk.id,
         "content": chunk.content,
@@ -251,15 +352,33 @@ def _row_to_result(row) -> dict:
         "page_start": chunk.page_start,
         "page_end": chunk.page_end,
         "chunk_index": chunk.chunk_index,
-        "metadata": chunk.metadata_json or {},
+        "metadata": metadata,
     }
+
+
+def _current_pdf_chunk_filter():
+    stored_generation = ArticleChunk.metadata_json[_PDF_GENERATION_METADATA_KEY].as_integer()
+    stored_revision = ArticleChunk.metadata_json[_PDF_CONTENT_REVISION_METADATA_KEY].as_integer()
+    current_pdf_chunks = and_(
+        stored_generation == _articles.c.pdf_generation,
+        stored_revision == _articles.c.content_revision,
+    )
+    legacy_chunks = and_(
+        _articles.c.pdf_generation == 0,
+        _articles.c.content_revision == 0,
+        stored_generation.is_(None),
+        stored_revision.is_(None),
+    )
+    return or_(current_pdf_chunks, legacy_chunks)
 
 
 def _run_similarity_query(session, article_id: int, query_embedding: list[float], limit: int, sections=None):
     query = (
         session.query(ArticleChunk, Embedding.embedding.l2_distance(query_embedding).label("distance"))
         .join(Embedding)
+        .join(_articles, ArticleChunk.article_id == _articles.c.id)
         .filter(ArticleChunk.article_id == article_id)
+        .filter(_current_pdf_chunk_filter())
     )
     if sections:
         query = query.filter(ArticleChunk.section.in_(sections))

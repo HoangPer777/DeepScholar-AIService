@@ -10,6 +10,7 @@ Goal: Surface counterexamples proving that `process_pdf_pipeline` returns
 EXPECTED OUTCOME: This test FAILS on unfixed code — failure confirms the bug exists.
 """
 
+import uuid
 import pytest
 from unittest.mock import patch, MagicMock
 from hypothesis import given, settings as h_settings, HealthCheck
@@ -59,6 +60,10 @@ chunk_strategy = st.lists(
 
 def make_request(article_id: int) -> PDFUploadRequest:
     return PDFUploadRequest(
+        task_id=str(uuid.uuid4()),
+        generation=1,
+        content_revision=0,
+        idempotency_key=str(uuid.uuid4()),
         pdf_url="https://example.com/test.pdf",
         slug=f"test-article-{article_id}",
         article_id=article_id,
@@ -84,14 +89,15 @@ def run_pipeline_with_failed_ingest(article_id: int, error: str) -> tuple[dict, 
     with patch("app.api.pdf._download_pdf_from_r2", return_value=fake_pdf_bytes), \
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=fake_chunks), \
-         patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.requests.post") as mock_post, \
          patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
         mock_response.ok = True
         mock_response.status_code = 200
-        mock_patch.return_value = mock_response
+        mock_response.json.return_value = {"status": "article_saved"}
+        mock_post.return_value = mock_response
 
         request = make_request(article_id)
         pipeline_result = process_pdf_pipeline(request)
@@ -196,14 +202,15 @@ def run_pipeline_with_successful_ingest(article_id: int, chunks: list) -> dict:
     with patch("app.api.pdf._download_pdf_from_r2", return_value=fake_pdf_bytes), \
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=chunks), \
-         patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.requests.post") as mock_post, \
          patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
         mock_response.ok = True
         mock_response.status_code = 200
-        mock_patch.return_value = mock_response
+        mock_response.json.return_value = {"status": "article_saved"}
+        mock_post.return_value = mock_response
 
         request = make_request(article_id)
         return process_pdf_pipeline(request)
@@ -267,22 +274,30 @@ def test_property2b_preservation_async_upload_returns_processing_started(slug):
     with patch("app.api.pdf._download_pdf_from_r2", return_value=fake_pdf_bytes), \
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=["chunk one", "chunk two"]), \
-         patch("app.api.pdf.requests.patch") as mock_patch, \
+          patch("app.api.pdf.requests.post") as mock_post, \
          patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
         mock_response.ok = True
         mock_response.status_code = 200
-        mock_patch.return_value = mock_response
+        mock_response.json.return_value = {"status": "article_saved"}
+        mock_post.return_value = mock_response
 
         request = PDFUploadRequest(
+            task_id=str(uuid.uuid4()),
+            generation=1,
+            content_revision=0,
+            idempotency_key=str(uuid.uuid4()),
             pdf_url="https://example.com/test.pdf",
             slug=slug if slug else "test-slug",
             article_id=1,
         )
         background_tasks = BackgroundTasks()
-        result = upload_pdf(request, background_tasks, sync=False)
+        fake_job_store = MagicMock(is_persistent=True)
+        fake_job_store.create_job_if_absent.return_value = True
+        with patch("app.api.pdf._job_store", fake_job_store):
+            result = upload_pdf(request, background_tasks, sync=False, x_internal_service_key="test-internal-key")
 
     assert result.get("status") == "processing_started", (
         f"Expected status='processing_started' for sync=False, got: {result!r}"
@@ -323,22 +338,27 @@ def test_property2c_preservation_sync_upload_returns_completed(article_id, chunk
     with patch("app.api.pdf._download_pdf_from_r2", return_value=fake_pdf_bytes), \
          patch("app.api.pdf.extract_sections_with_llamaparse", return_value=fake_extracted), \
          patch("app.api.pdf.chunk_text", return_value=chunks), \
-         patch("app.api.pdf.requests.patch") as mock_patch, \
+         patch("app.api.pdf.requests.post") as mock_post, \
          patch("app.api.pdf.ingest_paper_chunks", return_value=ingest_result), \
          patch("app.api.pdf.ingest_article_chunks", return_value=ingest_result):
 
         mock_response = MagicMock()
         mock_response.ok = True
         mock_response.status_code = 200
-        mock_patch.return_value = mock_response
+        mock_response.json.return_value = {"status": "article_saved"}
+        mock_post.return_value = mock_response
 
         request = PDFUploadRequest(
+            task_id=str(uuid.uuid4()),
+            generation=1,
+            content_revision=0,
+            idempotency_key=str(uuid.uuid4()),
             pdf_url="https://example.com/test.pdf",
             slug=f"test-article-{article_id}",
             article_id=article_id,
         )
         background_tasks = BackgroundTasks()
-        result = upload_pdf(request, background_tasks, sync=True)
+        result = upload_pdf(request, background_tasks, sync=True, x_internal_service_key="test-internal-key")
 
     assert result.get("status") == "completed", (
         f"Expected status='completed' for sync=True with successful pipeline, got: {result!r}"

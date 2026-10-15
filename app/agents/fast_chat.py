@@ -49,6 +49,8 @@ class FastChatAgent:
         )
 
         user_content = (
+            f"REPORT REVIEW STATUS: {report.review_status.upper()}\n"
+            f"REVIEWER FEEDBACK: {report.review_feedback or 'None'}\n\n"
             f"RESEARCH REPORT:\n{report.answer if report else 'N/A'}\n\n"
             f"CONVERSATION HISTORY:\n{history_text}\n\n"
             f"FOLLOW-UP QUESTION: {question}"
@@ -66,4 +68,5 @@ class FastChatAgent:
             "confidence_score": 0.85,  # fast chat is high-confidence by design
             "need_clarification": False,
             "is_fast_chat": True,
+            "research_review_status": report.review_status if report else "accepted",
         }

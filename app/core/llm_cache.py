@@ -8,7 +8,9 @@ from app.core.redis_client import create_redis_client, mask_redis_url
 
 logger = logging.getLogger(__name__)
 PLANNER_CACHE_TTL = 600  # 10 minutes (Requirement 5.3)
-CACHE_KEY_PREFIX = "llm_cache:planner:"
+# Versioned because the planner contract now contains mandatory dual retrieval
+# plans; old cached skip-search decisions must never be reused.
+CACHE_KEY_PREFIX = "llm_cache:planner:v2:"
 
 
 def normalize_query(query: str) -> str:
