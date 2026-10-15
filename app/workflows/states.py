@@ -59,8 +59,8 @@ class AgentState(BaseModel):
     confidence_score: float = 0.0
     # Số lần Writer đã viết lại
     iteration_count: int = 0
-    # Giới hạn số lần viết lại
-    max_iterations: int = 2
+    # Writer–Reviewer cycles: initial draft plus at most two rewrites.
+    max_iterations: int = 3
 
     # To track agent execution flow
     logs: Annotated[List[str], operator.add] = Field(default_factory=list)

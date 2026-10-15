@@ -25,7 +25,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -230,6 +230,10 @@ class ResearchReport(BaseModel):
     review_feedback: str = Field(
         default="",
         description="Reviewer commentary on the answer",
+    )
+    review_status: Literal["accepted", "unreviewed"] = Field(
+        default="accepted",
+        description="Whether the report was accepted by the reviewer or is an unreviewed draft",
     )
 
 

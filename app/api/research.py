@@ -55,7 +55,7 @@ _RESEARCH_AGENTS = {
 _MAX_ACTIVITIES = 50
 _MAX_SOURCE_PREVIEWS = 20
 _MAX_DETAIL_LENGTH = 500
-_MAX_AGENT_OUTPUTS = 2
+_MAX_AGENT_OUTPUTS = 3
 _MAX_DRAFT_LENGTH = 20_000
 _MAX_REVIEW_FEEDBACK_LENGTH = 5_000
 
@@ -189,7 +189,7 @@ def _initial_job_snapshot(debug: bool = False) -> dict:
             "phase": "queued",
             "message": "Research request accepted",
             "iteration": 0,
-            "max_iterations": 2,
+            "max_iterations": 3,
             "started_at": now,
             "updated_at": now,
         },
@@ -253,7 +253,7 @@ class _ProgressEmitter:
             current_progress = self._snapshot.get("progress", {})
             iteration = event.get("iteration", current_progress.get("iteration", 0))
             max_iterations = event.get(
-                "max_iterations", current_progress.get("max_iterations", 2)
+                "max_iterations", current_progress.get("max_iterations", 3)
             )
             message = _truncate(event.get("message") or event.get("title"))
 
@@ -395,6 +395,7 @@ def _build_response(
             or ("accept" if reviewed_answer else "rejected")
         ),
         "review_status": "rejected" if use_unreviewed_draft else ("accepted" if reviewed_answer else "rejected"),
+        "fast_chat_ready": bool(result.get("fast_chat_ready", False)),
         "review_feedback":   result.get("review_feedback"),
         "agent_outputs": _build_agent_outputs(result),
     }

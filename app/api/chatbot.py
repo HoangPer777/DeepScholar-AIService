@@ -135,10 +135,10 @@ async def _run_chat_job(
         })
     except SessionContextNotFoundError:
         # Requirement 3.5: return 404 when session has no research context
-        logger.warning("Chat job %s: session '%s' not found or has no research context", task_id, session_id)
+        logger.warning("Chat job %s: session '%s' has no Fast Chat research context", task_id, session_id)
         _update_chat_job(task_id, owner_id, session_id, {
             "status": "error",
-            "error": f"Session '{session_id}' not found or has no research context. Please start a deep research session first.",
+            "error": f"Session '{session_id}' has no Fast Chat research context. The research context may not have been saved or may have expired. Please run Deep Research again.",
             "error_code": 404,
         })
     except Exception as e:

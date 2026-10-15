@@ -265,15 +265,28 @@ async def test_fast_chat_404_no_context():
 
 def test_agent_state_default_max_iterations():
     """
-    AgentState must default max_iterations to 1 to avoid unnecessary
-    Writer-Reviewer loops.
+    AgentState allows an initial draft plus at most three rewrites.
 
     Requirement 1.6
     """
     from app.workflows.states import AgentState
 
     state = AgentState(question="test question")
-    assert state.max_iterations == 2
+    assert state.max_iterations == 3
+
+
+def test_review_router_allows_second_rewrite_then_stops():
+    from app.graph.build_graph import _review_router
+    from app.workflows.states import AgentState
+
+    state = AgentState(question="test", iteration_count=2, max_iterations=3)
+    assert _review_router(state) == "writer"
+
+    state.iteration_count = 3
+    assert _review_router(state) == "reject"
+
+    state.reviewed_answer = "Accepted before the limit"
+    assert _review_router(state) == "accept"
 
 
 def test_follow_up_response_has_is_fast_chat_field():

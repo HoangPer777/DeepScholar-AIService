@@ -45,7 +45,7 @@ def _emit_progress(
     detail: str = "",
     message: Optional[str] = None,
     iteration: int = 0,
-    max_iterations: int = 2,
+    max_iterations: int = 3,
     metadata: Optional[dict] = None,
     source_previews: Optional[list[dict]] = None,
 ) -> None:
@@ -121,7 +121,27 @@ def _persist_fast_chat(
 # ---------------------------------------------------------------------------
 
 
-def _save_research_context(session_id: str, result: dict) -> None:
+def _research_context_content(result: dict) -> tuple[str, str] | None:
+    """Return eligible report content and its review state for Fast Chat."""
+    reviewed_answer = result.get("reviewed_answer")
+    if reviewed_answer:
+        return reviewed_answer, "accepted"
+
+    failure_code = result.get("failure_code", "research_review_rejected")
+    if (
+        result.get("review_decision") == "rejected"
+        and result.get("draft_answer")
+        and failure_code not in {
+            "reviewer_unavailable",
+            "writer_empty_response",
+            "graph_checkpoint_unavailable",
+        }
+    ):
+        return result["draft_answer"], "unreviewed"
+    return None
+
+
+def _save_research_context(session_id: str, result: dict) -> bool:
     """Persist the pipeline result as a Research_Context in Redis.
 
     Called after the full pipeline completes so that subsequent follow-up
@@ -139,10 +159,11 @@ def _save_research_context(session_id: str, result: dict) -> None:
         store = MemoryStore(redis_client)
 
         # Build ResearchReport from pipeline result
-        report_answer: str = result.get("reviewed_answer") or ""
-        if not report_answer:
-            logger.info("_save_research_context: not saving rejected report for session %s", session_id)
-            return
+        selected_report = _research_context_content(result)
+        if selected_report is None:
+            logger.info("_save_research_context: no eligible report for session %s", session_id)
+            return False
+        report_answer, review_status = selected_report
         confidence_score: float = float(result.get("confidence_score", 0.0))
         review_feedback: str = result.get("review_feedback") or ""
 
@@ -171,6 +192,7 @@ def _save_research_context(session_id: str, result: dict) -> None:
             sources=sources,
             confidence_score=confidence_score,
             review_feedback=review_feedback,
+            review_status=review_status,
         )
 
         store.init_session_context(
@@ -180,16 +202,19 @@ def _save_research_context(session_id: str, result: dict) -> None:
         )
 
         logger.info(
-            "_save_research_context: saved context for session %s (%d sources)",
+            "_save_research_context: saved %s context for session %s (%d sources)",
+            review_status,
             session_id,
             len(sources),
         )
+        return True
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "_save_research_context: failed for session %s: %s",
             session_id,
             exc,
         )
+        return False
     finally:
         if redis_client is not None:
             try:
@@ -335,6 +360,8 @@ def run_chat_workflow(
     merged_timings = {**timings, **(result.get("timings") or {})}
     merged_timings["total_latency_ms"] = _elapsed_ms(start_perf)
     result["timings"] = merged_timings
-    if session_id and result.get("reviewed_answer"):
-        _save_research_context(session_id, result)
+    if session_id and _research_context_content(result) is not None:
+        result["fast_chat_ready"] = _save_research_context(session_id, result)
+    else:
+        result["fast_chat_ready"] = False
     return result
