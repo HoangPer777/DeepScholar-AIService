@@ -2,6 +2,10 @@
 
 FastAPI + LangGraph multi-agent system for intelligent document analysis, Q&A, and research automation.
 
+## Video Demo Deep Research
+
+[https://github.com/user-attachments/assets/YOUR_VIDEO_ID](https://github.com/user-attachments/assets/1cff9a7f-e1a5-4aac-aac5-0aa5dd5ab261)
+
 ## Overview
 
 This service provides:
